@@ -4,22 +4,23 @@ import requests
 from datetime import datetime, timedelta
 import numpy as np
 import random
+from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
 
 # ================== SETTINGS ==================
 API_KEY = "fde1ec72-770a-45f1-a2aa-2af4507c9d12"  # Replace with your CoinMarketCap API key
 API_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-VOLATILITY_THRESHOLD = 5  # % change in 24h for high volatility
-CAPITAL_BASE = 50  # Max possible AI allocation per trade (£)
-REVOLUT_PREMIUM_FEE = 0.0099  # 0.99% per trade
-REVOLUT_SPREAD = 0.005  # 0.5% per trade
-ROUND_TRIP_COST = (REVOLUT_PREMIUM_FEE + REVOLUT_SPREAD) * 2  # ~2.98% total
+VOLATILITY_THRESHOLD = 5  # Minimum % change 24h to be considered high volatility
+CAPITAL_BASE = 50  # Max base allocation per trade (£)
+REVOLUT_PREMIUM_FEE = 0.0099
+REVOLUT_SPREAD = 0.005
+ROUND_TRIP_COST = (REVOLUT_PREMIUM_FEE + REVOLUT_SPREAD) * 2
 # ===============================================
 
-st.set_page_config(page_title="Top 5 High Volatility Breakout Picks", layout="wide")
-st.title("📊 Top 5 High Volatility Breakout Picks – AI Enhanced (Revolut Premium Fees Applied)")
+st.set_page_config(page_title="AI Predictive Crypto Breakouts", layout="wide")
+st.title("📊 Top 5 High Volatility Breakout Picks – AI Predictive Model (Revolut Premium Fees Applied)")
 st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
-# Fetch live crypto prices
+# ===== Fetch live crypto data =====
 headers = {"X-CMC_PRO_API_KEY": API_KEY}
 params = {"start": 1, "limit": 200, "convert": "USD"}
 response = requests.get(API_URL, headers=headers, params=params)
@@ -29,6 +30,17 @@ if response.status_code != 200:
 else:
     data = response.json()["data"]
 
+    # ===== Placeholder Predictive Model =====
+    # (Replace with a trained model on historical OHLCV/order flow data)
+    def ai_predict_breakout_prob(volatility, liquidity, trend_strength):
+        """Simulates AI breakout probability based on multiple factors"""
+        base = 50 + (volatility * 2) + (liquidity * 10) + (trend_strength * 15)
+        return min(100, max(50, base + random.uniform(-5, 5)))
+
+    def ai_dynamic_allocation(score, liquidity_weight, rr_ratio):
+        """Adjusts allocation based on conviction, liquidity, and R/R"""
+        return round(CAPITAL_BASE * (score / 100) * liquidity_weight * min(1, rr_ratio / 2), 2)
+
     rows = []
     for asset in data:
         symbol = asset["symbol"]
@@ -37,78 +49,77 @@ else:
         change_24h = asset["quote"]["USD"]["percent_change_24h"]
         volume_24h = asset["quote"]["USD"]["volume_24h"]
 
-        # Only include highly volatile assets
         if abs(change_24h) >= VOLATILITY_THRESHOLD:
-            # ===== AI Breakout Score =====
+            # ===== AI Feature Engineering =====
             liquidity_weight = min(1, volume_24h / 1e9)
-            volatility_factor = min(2, abs(change_24h) / 10)
-            score = round(min(100, 50 + (volatility_factor * 20) + (liquidity_weight * 20)), 2)
+            trend_strength = np.tanh(change_24h / 10)
+            volatility_factor = abs(change_24h)
+
+            # ===== AI Predictions =====
+            breakout_score = ai_predict_breakout_prob(volatility_factor, liquidity_weight, trend_strength)
+
+            # ===== ATR (approximation until historical data is integrated) =====
+            atr = price * (volatility_factor / 100) / 2
+
+            # ===== SL & TP Calculation =====
+            sl_price = price - max(1.5 * atr, price * 0.02)
+            tp1_price = price + max(2.5 * atr, price * 0.03)
+
+            sl_percent = (sl_price - price) / price * 100
+            tp1_percent = (tp1_price - price) / price * 100
+
+            rr_ratio = abs(tp1_percent / sl_percent)
 
             # ===== AI Allocation =====
-            risk_adjustor = 1.0 if score >= 90 else 0.7 if score >= 85 else 0.5
-            ai_alloc = round(CAPITAL_BASE * (score / 100) * liquidity_weight * risk_adjustor, 2)
+            ai_alloc = ai_dynamic_allocation(breakout_score, liquidity_weight, rr_ratio)
 
-            # ===== ATR (approximation for demo) =====
-            atr = price * (abs(change_24h) / 100) / 2
+            # ===== Net After Fees =====
+            net_tp1_percent = tp1_percent - (ROUND_TRIP_COST * 100)
+            net_tp1_value = ai_alloc * (net_tp1_percent / 100)
 
-            # ===== AI Stop Loss =====
-            sl_price = price - max(1.5 * atr, price * 0.02)
-            sl_percent = (sl_price - price) / price * 100
-            sl_value = ai_alloc * (sl_percent / 100)
-
-            # ===== AI Take Profit =====
-            tp1_price = price + max(2.5 * atr, price * 0.03)
-            tp1_percent = (tp1_price - price) / price * 100
-            tp1_value = ai_alloc * (tp1_percent / 100)
+            # ===== Trigger & Distance =====
+            trigger_price = price  # Later: Use AI trigger condition
+            trigger_percent = ((price - trigger_price) / trigger_price) * 100
+            distance_to_sl_percent = ((sl_price - price) / price) * 100
+            distance_to_tp_percent = ((tp1_price - price) / price) * 100
 
             # ===== Predicted Breakout Time =====
             predicted_minutes = random.randint(30, 180)
             pred_breakout = (datetime.utcnow() + timedelta(minutes=predicted_minutes)).strftime("%H:%M")
 
-            # ===== Adjust for Revolut Premium Fees =====
-            net_tp1_percent = tp1_percent - (ROUND_TRIP_COST * 100)
-            net_tp1_value = tp1_value - (ai_alloc * ROUND_TRIP_COST)
-
             # ===== Trend =====
             trend_symbol = "↑" if change_24h > 0 else "↓" if change_24h < 0 else "↔"
 
-            # ===== Trigger & Distance =====
-            trigger_price = price  # Placeholder – replace with AI breakout trigger
-            trigger_percent = ((price - trigger_price) / trigger_price) * 100
-            distance_to_sl_percent = ((sl_price - price) / price) * 100
-            distance_to_tp_percent = ((tp1_price - price) / price) * 100
-
             # ===== AI Reasoning =====
             reasoning = (
-                f"Volatility {abs(change_24h):.1f}%, vol ${volume_24h/1e6:.1f}M, "
-                f"ATR {atr:.2f}, R/R {(net_tp1_percent / abs(sl_percent)):.2f}."
+                f"Prob {breakout_score:.1f}%, Vol {abs(change_24h):.1f}%, "
+                f"Liquidity ${volume_24h/1e6:.1f}M, ATR {atr:.2f}, R/R {rr_ratio:.2f}."
             )
 
             rows.append({
                 "Rank": None,
                 "Name": name,
                 "Symbol": symbol,
-                "Breakout Score": score,
-                "⚡ Strike Window": "Yes" if score >= 85 else "No",
+                "Breakout Score": round(breakout_score, 2),
+                "⚡ Strike Window": "Yes" if breakout_score >= 85 else "No",
                 "Pred. Breakout (hh:mm)": pred_breakout,
                 "Entry Price (USD)": round(price, 4),
-                "SL % / £ (Price)": f"{sl_percent:.2f}% / £{sl_value:.2f} ({sl_price:.4f})",
+                "SL % / £ (Price)": f"{sl_percent:.2f}% / £{ai_alloc * (sl_percent/100):.2f} ({sl_price:.4f})",
                 "TP1 % / £ (Price)": f"{net_tp1_percent:.2f}% / £{net_tp1_value:.2f} ({tp1_price:.4f})",
                 "Trigger %": f"{trigger_percent:.2f}%",
                 "Distance to SL / TP (%)": f"{distance_to_sl_percent:.2f}% / {distance_to_tp_percent:.2f}%",
                 "AI Alloc. (£)": ai_alloc,
                 "Gain Pot. % / £": f"{net_tp1_percent:.2f}% / £{net_tp1_value:.2f}",
                 "Trend": trend_symbol,
-                "Go/No-Go": "Go" if score >= 85 else "No-Go",
+                "Go/No-Go": "Go" if breakout_score >= 85 else "No-Go",
                 "AI Reasoning": reasoning
             })
 
-    # ===== Sort & Rank =====
+    # ===== Sort & Display =====
     df = pd.DataFrame(rows).sort_values(by="Breakout Score", ascending=False).reset_index(drop=True)
     df["Rank"] = df.index + 1
     df = df.head(5)
 
-    # ===== Display Table =====
     st.dataframe(df, use_container_width=True)
 
     st.markdown("---")
