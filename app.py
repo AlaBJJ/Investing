@@ -4,7 +4,6 @@ import requests
 from datetime import datetime, timedelta
 import numpy as np
 import random
-from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
 
 # ================== SETTINGS ==================
 API_KEY = "fde1ec72-770a-45f1-a2aa-2af4507c9d12"  # Replace with your CoinMarketCap API key
@@ -31,14 +30,18 @@ else:
     data = response.json()["data"]
 
     # ===== Placeholder Predictive Model =====
-    # (Replace with a trained model on historical OHLCV/order flow data)
     def ai_predict_breakout_prob(volatility, liquidity, trend_strength):
-        """Simulates AI breakout probability based on multiple factors"""
+        """
+        Simulated AI breakout probability based on volatility, liquidity, and trend.
+        Later replaced with trained ML model.
+        """
         base = 50 + (volatility * 2) + (liquidity * 10) + (trend_strength * 15)
         return min(100, max(50, base + random.uniform(-5, 5)))
 
     def ai_dynamic_allocation(score, liquidity_weight, rr_ratio):
-        """Adjusts allocation based on conviction, liquidity, and R/R"""
+        """
+        Adjusts allocation based on conviction, liquidity, and R/R.
+        """
         return round(CAPITAL_BASE * (score / 100) * liquidity_weight * min(1, rr_ratio / 2), 2)
 
     rows = []
@@ -50,27 +53,25 @@ else:
         volume_24h = asset["quote"]["USD"]["volume_24h"]
 
         if abs(change_24h) >= VOLATILITY_THRESHOLD:
-            # ===== AI Feature Engineering =====
+            # ===== Feature Engineering =====
             liquidity_weight = min(1, volume_24h / 1e9)
             trend_strength = np.tanh(change_24h / 10)
             volatility_factor = abs(change_24h)
 
-            # ===== AI Predictions =====
+            # ===== Predictions =====
             breakout_score = ai_predict_breakout_prob(volatility_factor, liquidity_weight, trend_strength)
 
-            # ===== ATR (approximation until historical data is integrated) =====
+            # ===== ATR (approximation) =====
             atr = price * (volatility_factor / 100) / 2
 
-            # ===== SL & TP Calculation =====
+            # ===== SL & TP =====
             sl_price = price - max(1.5 * atr, price * 0.02)
             tp1_price = price + max(2.5 * atr, price * 0.03)
-
             sl_percent = (sl_price - price) / price * 100
             tp1_percent = (tp1_price - price) / price * 100
-
             rr_ratio = abs(tp1_percent / sl_percent)
 
-            # ===== AI Allocation =====
+            # ===== Allocation =====
             ai_alloc = ai_dynamic_allocation(breakout_score, liquidity_weight, rr_ratio)
 
             # ===== Net After Fees =====
@@ -78,7 +79,7 @@ else:
             net_tp1_value = ai_alloc * (net_tp1_percent / 100)
 
             # ===== Trigger & Distance =====
-            trigger_price = price  # Later: Use AI trigger condition
+            trigger_price = price
             trigger_percent = ((price - trigger_price) / trigger_price) * 100
             distance_to_sl_percent = ((sl_price - price) / price) * 100
             distance_to_tp_percent = ((tp1_price - price) / price) * 100
@@ -90,7 +91,7 @@ else:
             # ===== Trend =====
             trend_symbol = "↑" if change_24h > 0 else "↓" if change_24h < 0 else "↔"
 
-            # ===== AI Reasoning =====
+            # ===== Reasoning =====
             reasoning = (
                 f"Prob {breakout_score:.1f}%, Vol {abs(change_24h):.1f}%, "
                 f"Liquidity ${volume_24h/1e6:.1f}M, ATR {atr:.2f}, R/R {rr_ratio:.2f}."
