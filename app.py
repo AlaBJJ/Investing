@@ -2,17 +2,21 @@ import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime, timedelta
+import numpy as np
 import random
 
 # ================== SETTINGS ==================
-ALLOCATION = 30  # Fixed £30 allocation
 API_KEY = "fde1ec72-770a-45f1-a2aa-2af4507c9d12"  # Replace with your CoinMarketCap API key
 API_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-VOLATILITY_THRESHOLD = 5  # % change in 24h for "highly volatile"
+VOLATILITY_THRESHOLD = 5  # % change in 24h for high volatility
+CAPITAL_BASE = 50  # Max possible AI allocation per trade (£)
+REVOLUT_PREMIUM_FEE = 0.0099  # 0.99% per trade
+REVOLUT_SPREAD = 0.005  # 0.5% per trade
+ROUND_TRIP_COST = (REVOLUT_PREMIUM_FEE + REVOLUT_SPREAD) * 2  # ~2.98% total
 # ===============================================
 
 st.set_page_config(page_title="Top 5 High Volatility Breakout Picks", layout="wide")
-st.title("📊 Top 5 High Volatility Breakout Picks – Live AI Snapshot")
+st.title("📊 Top 5 High Volatility Breakout Picks – AI Enhanced (Revolut Premium Fees Applied)")
 st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
 # Fetch live crypto prices
@@ -35,27 +39,44 @@ else:
 
         # Only include highly volatile assets
         if abs(change_24h) >= VOLATILITY_THRESHOLD:
-            # AI-driven breakout score simulation
-            score = round(min(100, max(50, (abs(change_24h) * 1.5) + (volume_24h / 1e9))), 2)
+            # ===== AI Breakout Score (example model) =====
+            liquidity_weight = min(1, volume_24h / 1e9)  # caps at 1 for >$1B vol
+            volatility_factor = min(2, abs(change_24h) / 10)
+            score = round(min(100, 50 + (volatility_factor * 20) + (liquidity_weight * 20)), 2)
 
-            # Predicted breakout time (mocked using volatility pattern)
-            predicted_minutes = random.randint(15, 180)
+            # ===== AI Allocation =====
+            risk_adjustor = 1.0 if score >= 90 else 0.7 if score >= 85 else 0.5
+            ai_alloc = round(CAPITAL_BASE * (score / 100) * liquidity_weight * risk_adjustor, 2)
+
+            # ===== ATR (approximation for demo) =====
+            atr = price * (abs(change_24h) / 100) / 2  # half of daily range
+
+            # ===== AI Stop Loss =====
+            sl_price = price - max(1.5 * atr, price * 0.02)  # min 2% stop
+            sl_percent = (sl_price - price) / price * 100
+            sl_value = ai_alloc * (sl_percent / 100)
+
+            # ===== AI Take Profit =====
+            tp1_price = price + max(2.5 * atr, price * 0.03)  # min 3% profit target
+            tp1_percent = (tp1_price - price) / price * 100
+            tp1_value = ai_alloc * (tp1_percent / 100)
+
+            # ===== Predicted Breakout Time =====
+            predicted_minutes = random.randint(30, 180)
             pred_breakout = (datetime.utcnow() + timedelta(minutes=predicted_minutes)).strftime("%H:%M")
 
-            # Calculate TP & SL dynamically
-            tp1_price = price * (1 + (score / 1000))  # Model-based TP
-            sl_price = price * 0.95  # 5% stop-loss
+            # ===== Adjust for Revolut Premium Fees =====
+            net_tp1_percent = tp1_percent - (ROUND_TRIP_COST * 100)
+            net_tp1_value = tp1_value - (ai_alloc * ROUND_TRIP_COST)
 
-            sl_percent = (sl_price - price) / price * 100
-            tp1_percent = (tp1_price - price) / price * 100
-            sl_value = ALLOCATION * (sl_percent / 100)
-            tp1_value = ALLOCATION * (tp1_percent / 100)
-
-            # Trend calculation (simple directional bias)
+            # ===== Trend =====
             trend_symbol = "↑" if change_24h > 0 else "↓" if change_24h < 0 else "↔"
 
-            # Reasoning logic
-            reasoning = f"Volatility {abs(change_24h):.1f}% in 24h with volume ${volume_24h/1e6:.1f}M."
+            # ===== AI Reasoning =====
+            reasoning = (
+                f"Volatility {abs(change_24h):.1f}%, vol ${volume_24h/1e6:.1f}M, "
+                f"ATR {atr:.2f}, R/R {(net_tp1_percent / abs(sl_percent)):.2f}."
+            )
 
             rows.append({
                 "Rank": None,
@@ -66,20 +87,20 @@ else:
                 "Pred. Breakout (hh:mm)": pred_breakout,
                 "Entry Price (USD)": round(price, 4),
                 "SL % / £ (Price)": f"{sl_percent:.2f}% / £{sl_value:.2f} ({sl_price:.4f})",
-                "TP1 % / £ (Price)": f"{tp1_percent:.2f}% / £{tp1_value:.2f} ({tp1_price:.4f})",
-                "AI Alloc. (£)": ALLOCATION,
-                "Gain Pot. % / £": f"{tp1_percent:.2f}% / £{tp1_value:.2f}",
+                "TP1 % / £ (Price)": f"{net_tp1_percent:.2f}% / £{net_tp1_value:.2f} ({tp1_price:.4f})",
+                "AI Alloc. (£)": ai_alloc,
+                "Gain Pot. % / £": f"{net_tp1_percent:.2f}% / £{net_tp1_value:.2f}",
                 "Trend": trend_symbol,
                 "Go/No-Go": "Go" if score >= 85 else "No-Go",
                 "AI Reasoning": reasoning
             })
 
-    # Sort by Breakout Score
+    # ===== Sort & Rank =====
     df = pd.DataFrame(rows).sort_values(by="Breakout Score", ascending=False).reset_index(drop=True)
     df["Rank"] = df.index + 1
-    df = df.head(5)  # Top 5 picks only
+    df = df.head(5)  # Top 5 only
 
-    # Display table
+    # ===== Display Table =====
     st.dataframe(df, use_container_width=True)
 
     st.markdown("---")
