@@ -11,7 +11,7 @@ st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC
 # Settings
 ALLOCATION = 30  # £30 fixed allocation
 API_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-API_KEY = "YOUR_CMC_API_KEY"  # <-- Replace with your CoinMarketCap API key
+API_KEY = "fde1ec72-770a-45f1-a2aa-2af4507c9d12"  # <-- Replace with your CoinMarketCap API key
 LIMIT = 50  # number of assets to pull
 
 # Fetch live data
