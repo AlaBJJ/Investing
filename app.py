@@ -6,7 +6,7 @@ import numpy as np
 import random
 
 # ================== SETTINGS ==================
-API_KEY = "fde1ec72-770a-45f1-a2aa-2af4507c9d12"  # Replace with your CoinMarketCap API key
+API_KEY = "YOUR_CMC_API_KEY"  # Replace with your CoinMarketCap API key
 API_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
 VOLATILITY_THRESHOLD = 5  # % change in 24h for high volatility
 CAPITAL_BASE = 50  # Max possible AI allocation per trade (£)
@@ -39,8 +39,8 @@ else:
 
         # Only include highly volatile assets
         if abs(change_24h) >= VOLATILITY_THRESHOLD:
-            # ===== AI Breakout Score (example model) =====
-            liquidity_weight = min(1, volume_24h / 1e9)  # caps at 1 for >$1B vol
+            # ===== AI Breakout Score =====
+            liquidity_weight = min(1, volume_24h / 1e9)
             volatility_factor = min(2, abs(change_24h) / 10)
             score = round(min(100, 50 + (volatility_factor * 20) + (liquidity_weight * 20)), 2)
 
@@ -49,15 +49,15 @@ else:
             ai_alloc = round(CAPITAL_BASE * (score / 100) * liquidity_weight * risk_adjustor, 2)
 
             # ===== ATR (approximation for demo) =====
-            atr = price * (abs(change_24h) / 100) / 2  # half of daily range
+            atr = price * (abs(change_24h) / 100) / 2
 
             # ===== AI Stop Loss =====
-            sl_price = price - max(1.5 * atr, price * 0.02)  # min 2% stop
+            sl_price = price - max(1.5 * atr, price * 0.02)
             sl_percent = (sl_price - price) / price * 100
             sl_value = ai_alloc * (sl_percent / 100)
 
             # ===== AI Take Profit =====
-            tp1_price = price + max(2.5 * atr, price * 0.03)  # min 3% profit target
+            tp1_price = price + max(2.5 * atr, price * 0.03)
             tp1_percent = (tp1_price - price) / price * 100
             tp1_value = ai_alloc * (tp1_percent / 100)
 
@@ -71,6 +71,12 @@ else:
 
             # ===== Trend =====
             trend_symbol = "↑" if change_24h > 0 else "↓" if change_24h < 0 else "↔"
+
+            # ===== Trigger & Distance =====
+            trigger_price = price  # Placeholder – replace with AI breakout trigger
+            trigger_percent = ((price - trigger_price) / trigger_price) * 100
+            distance_to_sl_percent = ((sl_price - price) / price) * 100
+            distance_to_tp_percent = ((tp1_price - price) / price) * 100
 
             # ===== AI Reasoning =====
             reasoning = (
@@ -88,6 +94,8 @@ else:
                 "Entry Price (USD)": round(price, 4),
                 "SL % / £ (Price)": f"{sl_percent:.2f}% / £{sl_value:.2f} ({sl_price:.4f})",
                 "TP1 % / £ (Price)": f"{net_tp1_percent:.2f}% / £{net_tp1_value:.2f} ({tp1_price:.4f})",
+                "Trigger %": f"{trigger_percent:.2f}%",
+                "Distance to SL / TP (%)": f"{distance_to_sl_percent:.2f}% / {distance_to_tp_percent:.2f}%",
                 "AI Alloc. (£)": ai_alloc,
                 "Gain Pot. % / £": f"{net_tp1_percent:.2f}% / £{net_tp1_value:.2f}",
                 "Trend": trend_symbol,
@@ -98,7 +106,7 @@ else:
     # ===== Sort & Rank =====
     df = pd.DataFrame(rows).sort_values(by="Breakout Score", ascending=False).reset_index(drop=True)
     df["Rank"] = df.index + 1
-    df = df.head(5)  # Top 5 only
+    df = df.head(5)
 
     # ===== Display Table =====
     st.dataframe(df, use_container_width=True)
