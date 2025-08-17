@@ -5,13 +5,15 @@ import requests
 import json
 import os
 from datetime import datetime, timedelta
+import yfinance as yf
+import plotly.graph_objects as go
 
 # ==============================
 # Config
 # ==============================
-REFRESH_INTERVAL = 60  # seconds
+REFRESH_INTERVAL = 60
 PORTFOLIO_FILE = "portfolio.json"
-CAPITAL_BASE = 1000  # default investment pot
+CAPITAL_BASE = 1000
 REVOLUT_FEES = 0.0099 * 2 + 0.005 * 2  # ~2.98% round trip
 
 CMC_API_KEY = os.getenv("CMC_API_KEY", "fde1ec72-770a-45f1-a2aa-2af4507c9d12")
@@ -30,7 +32,7 @@ def save_portfolio(data):
         json.dump(data, f, indent=2)
 
 def fetch_crypto_data(limit=100):
-    """Fetch crypto data from CoinMarketCap (stable)."""
+    """Fetch top 100 cryptos from CoinMarketCap"""
     url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
     headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
     params = {"start": "1", "limit": str(limit), "convert": "USD"}
@@ -54,27 +56,43 @@ def fetch_crypto_data(limit=100):
 
     except Exception as e:
         st.error(f"CMC API failed: {e}")
-        # fallback dataset
-        return pd.DataFrame([
-            {"id": "bitcoin", "symbol": "BTC", "name": "Bitcoin", "priceUsd": 45000, "changePercent24Hr": 2.5, "volume24h": 20000000000, "marketCap": 850000000000},
-            {"id": "ethereum", "symbol": "ETH", "name": "Ethereum", "priceUsd": 3000, "changePercent24Hr": -1.2, "volume24h": 10000000000, "marketCap": 400000000000},
-            {"id": "solana", "symbol": "SOL", "name": "Solana", "priceUsd": 175, "changePercent24Hr": 6.3, "volume24h": 2500000000, "marketCap": 70000000000},
-            {"id": "cardano", "symbol": "ADA", "name": "Cardano", "priceUsd": 0.52, "changePercent24Hr": 3.8, "volume24h": 800000000, "marketCap": 20000000000},
-            {"id": "xrp", "symbol": "XRP", "name": "XRP", "priceUsd": 0.64, "changePercent24Hr": -0.5, "volume24h": 1500000000, "marketCap": 30000000000}
-        ])
+        return pd.DataFrame()
 
-def fetch_stock_data(symbols=["AAPL", "MSFT", "TSLA"]):
-    """Dummy stock fetcher (replace with yfinance for real data)."""
-    return pd.DataFrame({
-        "symbol": symbols,
-        "name": symbols,
-        "priceUsd": np.random.uniform(100, 300, len(symbols)),
-        "changePercent24Hr": np.random.uniform(-5, 5, len(symbols)),
-        "volume24h": np.random.uniform(1e6, 5e6, len(symbols)),
-        "marketCap": np.random.uniform(1e10, 5e11, len(symbols))
-    })
+def fetch_stock_data():
+    """Fetch top 100 stocks (S&P100) using yfinance"""
+    sp100 = ["AAPL","MSFT","AMZN","TSLA","GOOGL","BRK-B","NVDA","META","JNJ","XOM","JPM","V","PG","UNH","HD","MA","PFE","CVX","ABBV","BAC",
+             "KO","PEP","MRK","DIS","CSCO","VZ","WMT","ADBE","NFLX","T","INTC","CRM","CMCSA","ABT","PYPL","NKE","ORCL","ACN","MCD","TMO",
+             "DHR","LLY","QCOM","COST","TXN","NEE","MDT","LIN","HON","AMGN","PM","AVGO","BMY","UNP","LOW","UPS","MS","RTX","IBM","GS","CAT",
+             "SCHW","AMD","AMT","AXP","LMT","INTU","BLK","DE","CVS","ISRG","GE","SPGI","PLD","GILD","MDLZ","NOW","ADP","CI","C","SYK","BA",
+             "MO","ZTS","USB","BKNG","MMC","TGT","CB","BDX","CCI","CL","DUK","MMM","SO","CME","PNC","SHW","ICE","APD","EQIX"]
+    try:
+        tickers = yf.download(sp100, period="1d", interval="1h", progress=False, threads=True)
+        latest = tickers["Close"].iloc[-1]
 
-def calc_breakout_table(data, investment_pot=CAPITAL_BASE, currency="USD"):
+        df = []
+        for sym in sp100:
+            ticker = yf.Ticker(sym)
+            info = ticker.info
+            price = latest[sym]
+            change_pct = info.get("regularMarketChangePercent", 0.0)
+            volume = info.get("volume", 1)
+            mcap = info.get("marketCap", 1)
+            df.append({
+                "symbol": sym,
+                "name": info.get("shortName", sym),
+                "priceUsd": price,
+                "changePercent24Hr": change_pct,
+                "volume24h": volume,
+                "marketCap": mcap
+            })
+
+        return pd.DataFrame(df)
+
+    except Exception as e:
+        st.error(f"Stock API failed: {e}")
+        return pd.DataFrame()
+
+def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
     rows = []
     now = datetime.utcnow()
     total_mcap = data["marketCap"].sum() if "marketCap" in data else 1
@@ -90,13 +108,10 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE, currency="USD"):
         # --- Factors ---
         vol_factor = min(abs(change) / 10, 1.0)
         vol_score = vol_factor * 100
-
         volume_norm = np.log1p(volume) / 25
         volm_score = min(volume_norm, 1.0) * 100
-
         mcap_norm = mcap / total_mcap
         liq_score = min(mcap_norm * 100, 100)
-
         trend_score = (np.tanh(change / 5) + 1) * 50
 
         # Weighted score
@@ -132,41 +147,37 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE, currency="USD"):
             round(price, 4), f"{sl_pct:.2f}% (£{alloc * sl_pct/100:.2f}) ({sl_price:.2f})",
             f"{tp1_pct:.2f}% (£{gain_pot:.2f}) ({tp1_price:.2f})",
             "0.00%", f"{sl_pct:.2f}% / {tp1_pct:.2f}%", f"£{alloc}",
-            f"{tp1_pct:.2f}% / £{gain_pot}", trend, go, reasoning
+            f"{tp1_pct:.2f}% / £{gain_pot}", trend, go, reasoning, sl_price, tp1_price
         ])
 
     df = pd.DataFrame(rows, columns=[
         "Rank","Name","Symbol","Breakout Score","⚡ Strike Window","Pred. Breakout (hh:mm)",
-        "Entry Price (USD/GBP)","SL % / £ (Price)","TP1 % / £ (Price)","Trigger %","Distance to SL / TP (%)",
-        "AI Alloc. (£)","Gain Pot. % / £","Trend","Go/No-Go","AI Reasoning"
+        "Entry Price (USD/GBP)","SL % / £ (Price)","TP1 % / £ (Price)","Trigger %",
+        "Distance to SL / TP (%)","AI Alloc. (£)","Gain Pot. % / £","Trend","Go/No-Go",
+        "AI Reasoning","SL_Price","TP1_Price"
     ])
     df["Rank"] = range(1, len(df) + 1)
-    return df.sort_values("Breakout Score", ascending=False).head(5)
+    return df.sort_values("Breakout Score", ascending=False).head(100)
 
-def build_ai_portfolio(df):
-    portfolio = []
-    for _, row in df.iterrows():
-        if row["Go/No-Go"] == "Go":
-            entry = row["Entry Price (USD/GBP)"]
-            alloc_str = row["AI Alloc. (£)"].replace("£", "")
-            try:
-                size = float(alloc_str)
-            except:
-                size = 0
-            current = entry
-            value = size
-            pl = 0
-            pl_pct = 0
-            sl_price = float(row["SL % / £ (Price)"].split("(")[-1].replace(")", ""))
-            tp1_price = float(row["TP1 % / £ (Price)"].split("(")[-1].replace(")", ""))
-            portfolio.append([
-                row["Symbol"], entry, current, size, value, pl, pl_pct,
-                sl_price, tp1_price,
-                f"{(tp1_price-current)/current*100:.2f}%", "Open"
-            ])
-    return pd.DataFrame(portfolio, columns=[
-        "Symbol","Entry","Current","Size (£)","Value","P/L £","P/L %","SL Price","TP1 Price","% to TP1","Status"
-    ])
+def plot_chart(symbol, df):
+    """Plot candlestick with SL/TP lines"""
+    try:
+        hist = yf.download(symbol, period="5d", interval="1h")
+        fig = go.Figure(data=[go.Candlestick(
+            x=hist.index,
+            open=hist['Open'],
+            high=hist['High'],
+            low=hist['Low'],
+            close=hist['Close'],
+            name=symbol
+        )])
+        sl = df.loc[df["Symbol"] == symbol, "SL_Price"].values[0]
+        tp = df.loc[df["Symbol"] == symbol, "TP1_Price"].values[0]
+        fig.add_hline(y=sl, line_color="red", annotation_text="SL", annotation_position="bottom right")
+        fig.add_hline(y=tp, line_color="green", annotation_text="TP", annotation_position="top right")
+        st.plotly_chart(fig, use_container_width=True)
+    except:
+        st.warning(f"No chart data for {symbol}")
 
 # ==============================
 # Streamlit Layout
@@ -175,90 +186,45 @@ st.set_page_config(layout="wide", page_title="AI Breakout Scanner")
 
 st.sidebar.header("Settings")
 pot = st.sidebar.number_input("Investment Pot (£)", min_value=10, value=CAPITAL_BASE, step=10)
-currency = st.sidebar.selectbox("Currency", ["GBP", "USD"])
-refresh = st.sidebar.selectbox("Refresh Interval", [30, 60, 300], index=1)
 
-tabs = st.tabs(["Live Crypto", "Live Stocks", "Simulation Crypto", "Simulation Stocks", "Your Tracker", "AI Simulated Tracker"])
+tabs = st.tabs(["Live Crypto", "Live Stocks", "Chart View"])
 
 # --- Live Crypto
 with tabs[0]:
-    st.subheader("Live Crypto Breakouts")
+    st.subheader("Live Crypto Breakouts (Top 100)")
     crypto = fetch_crypto_data()
     if not crypto.empty:
-        crypto_table = calc_breakout_table(crypto, pot, currency)
-        st.dataframe(crypto_table, use_container_width=True)
-        st.caption(f"Last updated: {datetime.utcnow().strftime('%H:%M:%S')} UTC")
+        crypto_table = calc_breakout_table(crypto, pot)
+
+        display_cols = [
+            "Rank","Name","Symbol","Breakout Score","⚡ Strike Window","Pred. Breakout (hh:mm)",
+            "Entry Price (USD/GBP)","SL % / £ (Price)","TP1 % / £ (Price)","Trigger %",
+            "Distance to SL / TP (%)","AI Alloc. (£)","Gain Pot. % / £","Trend","Go/No-Go","AI Reasoning"
+        ]
+        st.dataframe(crypto_table[display_cols], use_container_width=True)
+
+        choice = st.selectbox("Select crypto for chart", crypto_table["Symbol"])
+        if choice:
+            plot_chart(choice, crypto_table)
 
 # --- Live Stocks
 with tabs[1]:
-    st.subheader("Live Stock Breakouts")
+    st.subheader("Live Stock Breakouts (S&P100)")
     stocks = fetch_stock_data()
-    stock_table = calc_breakout_table(stocks, pot, currency)
-    st.dataframe(stock_table, use_container_width=True)
+    if not stocks.empty:
+        stock_table = calc_breakout_table(stocks, pot)
 
-# --- Simulation Tabs
+        display_cols = [
+            "Rank","Name","Symbol","Breakout Score","⚡ Strike Window","Pred. Breakout (hh:mm)",
+            "Entry Price (USD/GBP)","SL % / £ (Price)","TP1 % / £ (Price)","Trigger %",
+            "Distance to SL / TP (%)","AI Alloc. (£)","Gain Pot. % / £","Trend","Go/No-Go","AI Reasoning"
+        ]
+        st.dataframe(stock_table[display_cols], use_container_width=True)
+
+        choice = st.selectbox("Select stock for chart", stock_table["Symbol"])
+        if choice:
+            plot_chart(choice, stock_table)
+
+# --- Chart View
 with tabs[2]:
-    st.subheader("Simulation Crypto")
-    st.info("Historical backtest not yet implemented — placeholder.")
-
-with tabs[3]:
-    st.subheader("Simulation Stocks")
-    st.info("Historical backtest not yet implemented — placeholder.")
-
-# --- Your Tracker
-with tabs[4]:
-    st.subheader("Your Tracker (Manual Portfolio)")
-    portfolio = load_portfolio()
-
-    with st.form("add_position", clear_on_submit=True):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            symbol = st.text_input("Symbol")
-        with col2:
-            entry = st.number_input("Entry Price", min_value=0.0, value=0.0)
-        with col3:
-            size = st.number_input("Size (£)", min_value=0.0, value=0.0)
-        submitted = st.form_submit_button("Add Position")
-        if submitted and symbol and entry > 0 and size > 0:
-            portfolio.append({"symbol": symbol.upper(), "entry": entry, "size": size})
-            save_portfolio(portfolio)
-            st.success(f"Added {symbol.upper()}")
-
-    # Display portfolio
-    if portfolio:
-        rows = []
-        crypto = fetch_crypto_data()
-        for pos in portfolio:
-            sym = pos["symbol"]
-            entry = pos["entry"]
-            size = pos["size"]
-            price_row = crypto[crypto["symbol"].str.upper() == sym]
-            if not price_row.empty:
-                current = float(price_row.iloc[0]["priceUsd"])
-            else:
-                current = entry
-            value = (current / entry) * size
-            pl = value - size
-            pl_pct = (pl / size) * 100
-            sl = entry * 0.95
-            tp1 = entry * 1.3
-            rows.append([sym, entry, round(current,4), size, round(value,2), round(pl,2), round(pl_pct,2), sl, tp1, f"{(tp1-current)/current*100:.2f}%", "Open"])
-        df = pd.DataFrame(rows, columns=["Symbol","Entry","Current","Size (£)","Value","P/L £","P/L %","SL Price","TP1 Price","% to TP1","Status"])
-        st.dataframe(df, use_container_width=True)
-
-        if st.button("Clear Portfolio"):
-            portfolio = []
-            save_portfolio(portfolio)
-            st.warning("Portfolio cleared!")
-
-# --- AI Simulated Tracker
-with tabs[5]:
-    st.subheader("AI Simulated Tracker")
-    if 'crypto_table' in locals():
-        ai_df = build_ai_portfolio(crypto_table)
-        if not ai_df.empty:
-            st.dataframe(ai_df, use_container_width=True)
-        else:
-            st.info("No AI trades triggered (all No-Go).")
-    else:
-        st.warning("Run Live Crypto tab first to generate AI portfolio.")
+    st.info("Use the chart dropdowns in Crypto/Stocks tabs to see AI levels on charts.")
