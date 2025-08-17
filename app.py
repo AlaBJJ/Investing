@@ -14,6 +14,8 @@ PORTFOLIO_FILE = "portfolio.json"
 CAPITAL_BASE = 1000  # default investment pot
 REVOLUT_FEES = 0.0099 * 2 + 0.005 * 2  # ~2.98% round trip
 
+CMC_API_KEY = os.getenv("CMC_API_KEY", "fde1ec72-770a-45f1-a2aa-2af4507c9d12")
+
 # ==============================
 # Helpers
 # ==============================
@@ -27,38 +29,81 @@ def save_portfolio(data):
     with open(PORTFOLIO_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
-def fetch_crypto_data():
-    """Get crypto prices (CoinCap free API as placeholder)."""
-    url = "https://api.coincap.io/v2/assets"
+def fetch_crypto_data(limit=100):
+    """Fetch crypto data from CoinMarketCap (stable)."""
+    url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
+    headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
+    params = {"start": "1", "limit": str(limit), "convert": "USD"}
+
     try:
-        resp = requests.get(url, timeout=10).json()
-        data = pd.DataFrame(resp["data"])
-        data["priceUsd"] = data["priceUsd"].astype(float)
-        data["changePercent24Hr"] = data["changePercent24Hr"].astype(float)
-        return data
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        df = pd.DataFrame([{
+            "id": asset["id"],
+            "symbol": asset["symbol"],
+            "name": asset["name"],
+            "priceUsd": asset["quote"]["USD"]["price"],
+            "changePercent24Hr": asset["quote"]["USD"]["percent_change_24h"],
+            "volume24h": asset["quote"]["USD"]["volume_24h"],
+            "marketCap": asset["quote"]["USD"]["market_cap"]
+        } for asset in data["data"]])
+
+        return df
+
     except Exception as e:
-        st.error(f"Crypto API failed: {e}")
-        return pd.DataFrame()
+        st.error(f"CMC API failed: {e}")
+        # fallback dataset
+        return pd.DataFrame([
+            {"id": "bitcoin", "symbol": "BTC", "name": "Bitcoin", "priceUsd": 45000, "changePercent24Hr": 2.5, "volume24h": 20000000000, "marketCap": 850000000000},
+            {"id": "ethereum", "symbol": "ETH", "name": "Ethereum", "priceUsd": 3000, "changePercent24Hr": -1.2, "volume24h": 10000000000, "marketCap": 400000000000},
+            {"id": "solana", "symbol": "SOL", "name": "Solana", "priceUsd": 175, "changePercent24Hr": 6.3, "volume24h": 2500000000, "marketCap": 70000000000},
+            {"id": "cardano", "symbol": "ADA", "name": "Cardano", "priceUsd": 0.52, "changePercent24Hr": 3.8, "volume24h": 800000000, "marketCap": 20000000000},
+            {"id": "xrp", "symbol": "XRP", "name": "XRP", "priceUsd": 0.64, "changePercent24Hr": -0.5, "volume24h": 1500000000, "marketCap": 30000000000}
+        ])
 
 def fetch_stock_data(symbols=["AAPL", "MSFT", "TSLA"]):
     """Dummy stock fetcher (replace with yfinance for real data)."""
     return pd.DataFrame({
         "symbol": symbols,
-        "price": np.random.uniform(100, 300, len(symbols)),
-        "change": np.random.uniform(-5, 5, len(symbols))
+        "name": symbols,
+        "priceUsd": np.random.uniform(100, 300, len(symbols)),
+        "changePercent24Hr": np.random.uniform(-5, 5, len(symbols)),
+        "volume24h": np.random.uniform(1e6, 5e6, len(symbols)),
+        "marketCap": np.random.uniform(1e10, 5e11, len(symbols))
     })
 
 def calc_breakout_table(data, investment_pot=CAPITAL_BASE, currency="USD"):
     rows = []
     now = datetime.utcnow()
+    total_mcap = data["marketCap"].sum() if "marketCap" in data else 1
 
     for _, row in data.iterrows():
-        name = row.get("name", row["symbol"])
+        name = row["name"]
         symbol = row["symbol"].upper()
-        price = float(row.get("priceUsd", row.get("price", 0)))
-        change = float(row.get("changePercent24Hr", row.get("change", 0)))
+        price = float(row["priceUsd"])
+        change = float(row["changePercent24Hr"])
+        volume = float(row.get("volume24h", 1))
+        mcap = float(row.get("marketCap", 1))
+
+        # --- Factors ---
         vol_factor = min(abs(change) / 10, 1.0)
-        score = np.clip(50 + vol_factor * 50, 50, 100)
+        vol_score = vol_factor * 100
+
+        volume_norm = np.log1p(volume) / 25
+        volm_score = min(volume_norm, 1.0) * 100
+
+        mcap_norm = mcap / total_mcap
+        liq_score = min(mcap_norm * 100, 100)
+
+        trend_score = (np.tanh(change / 5) + 1) * 50
+
+        # Weighted score
+        score = (0.3 * vol_score + 0.3 * volm_score + 0.2 * liq_score + 0.2 * trend_score)
+        score = np.clip(score, 50, 100)
+
+        # --- ATR, SL, TP ---
         atr = price * abs(change) / 100 / 2
         sl_price = price - max(1.5 * atr, 0.02 * price)
         tp1_price = price + max(2.5 * atr, 0.03 * price)
@@ -67,17 +112,20 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE, currency="USD"):
         tp1_pct = (tp1_price - price) / price * 100 - REVOLUT_FEES * 100
         rr = abs(tp1_pct / sl_pct) if sl_pct != 0 else 0
 
+        # --- Kelly Allocation ---
         p = score / 100
         b = rr
         kelly = max((p * (b + 1) - 1) / b, 0) if b > 0 else 0
         alloc = round(min(investment_pot * kelly, investment_pot), 2)
         gain_pot = round(alloc * tp1_pct / 100, 2)
 
+        # --- AI reasoning ---
         strike = "Yes" if score >= 85 else "No"
         breakout_time = (now + timedelta(minutes=np.random.randint(30, 180))).strftime("%H:%M")
         trend = "↑" if change > 0 else ("↓" if change < 0 else "↔")
         go = "Go" if score >= 85 and trend == "↑" and rr > 1.5 else "No-Go"
-        reasoning = f"Score {score:.1f}, R/R {rr:.2f}, ATR {atr:.2f}, Change {change:.2f}%, Alloc £{alloc}"
+        reasoning = (f"Score {score:.1f}, Vol {change:.2f}%, Vol24h ${volume/1e6:.1f}M, "
+                     f"MCAP ${mcap/1e9:.1f}B, R/R {rr:.2f}, Kelly alloc £{alloc}")
 
         rows.append([
             None, name, symbol, round(score, 2), strike, breakout_time,
@@ -96,7 +144,6 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE, currency="USD"):
     return df.sort_values("Breakout Score", ascending=False).head(5)
 
 def build_ai_portfolio(df):
-    """Take breakout table and simulate positions AI would enter."""
     portfolio = []
     for _, row in df.iterrows():
         if row["Go/No-Go"] == "Go":
@@ -106,7 +153,7 @@ def build_ai_portfolio(df):
                 size = float(alloc_str)
             except:
                 size = 0
-            current = entry  # assume entry = now
+            current = entry
             value = size
             pl = 0
             pl_pct = 0
