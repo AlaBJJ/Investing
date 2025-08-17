@@ -1,220 +1,193 @@
-# ==============================
-# AI Breakout Scanner (Crypto + Stocks)
-# ==============================
-
-import streamlit as st
-import pandas as pd
-import numpy as np
-import requests
-import json
 import os
+import time
 from datetime import datetime, timedelta
-import yfinance as yf
+
+import pandas as pd
+import requests
+import streamlit as st
 import plotly.graph_objects as go
+import yfinance as yf
 
-# ==============================
-# Config
-# ==============================
-REFRESH_INTERVAL = 60
-CAPITAL_BASE = 1000
-REVOLUT_FEES = 0.0099 * 2 + 0.005 * 2  # ~2.98% round trip
+st.set_page_config(page_title="Crypto Dashboard", page_icon="📈", layout="wide")
 
-# --- CoinMarketCap API Key ---
-CMC_API_KEY = os.getenv("CMC_API_KEY", "YOUR_CMC_API_KEY_HERE")
+# ---------------------------
+# Helpers & Config
+# ---------------------------
+CMC_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
 
-# ==============================
-# Helpers
-# ==============================
-def fetch_crypto_data(limit=100):
-    """Fetch top 100 cryptos from CoinMarketCap"""
-    url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-    headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
-    params = {"start": "1", "limit": str(limit), "convert": "USD"}
+def get_cmc_key() -> str:
+    # Prefer Streamlit secrets; fall back to env var for local dev
+    key = st.secrets.get("CMC_API_KEY") or os.getenv("CMC_API_KEY")
+    return key
 
-    try:
-        resp = requests.get(url, headers=headers, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_cmc_listings(limit=50, convert="USD") -> pd.DataFrame:
+    """Fetch top crypto listings from CMC. Returns a tidy DataFrame."""
+    key = get_cmc_key()
+    if not key:
+        raise RuntimeError(
+            "Missing CMC_API_KEY. Add it to .streamlit/secrets.toml "
+            "and/or Streamlit Cloud → App → Settings → Secrets."
+        )
 
-        df = pd.DataFrame([{
-            "id": asset["id"],
-            "symbol": asset["symbol"],
-            "name": asset["name"],
-            "priceUsd": asset["quote"]["USD"]["price"],
-            "changePercent24Hr": asset["quote"]["USD"]["percent_change_24h"],
-            "volume24h": asset["quote"]["USD"]["volume_24h"],
-            "marketCap": asset["quote"]["USD"]["market_cap"]
-        } for asset in data["data"]])
+    headers = {"X-CMC_PRO_API_KEY": key}
+    params = {"start": 1, "limit": limit, "convert": convert}
+    r = requests.get(CMC_URL, headers=headers, params=params, timeout=20)
 
-        return df
+    if r.status_code == 401:
+        raise PermissionError(
+            "CMC returned 401 Unauthorized. Check your API key, header name, and plan."
+        )
+    r.raise_for_status()
 
-    except Exception as e:
-        st.error(f"CMC API failed: {e}")
-        return pd.DataFrame()
-
-def fetch_stock_data():
-    """Fetch top 100 stocks (S&P100) using yfinance"""
-    sp100 = ["AAPL","MSFT","AMZN","TSLA","GOOGL","BRK-B","NVDA","META","JNJ","XOM","JPM","V","PG","UNH","HD","MA","PFE","CVX","ABBV","BAC",
-             "KO","PEP","MRK","DIS","CSCO","VZ","WMT","ADBE","NFLX","T","INTC","CRM","CMCSA","ABT","PYPL","NKE","ORCL","ACN","MCD","TMO",
-             "DHR","LLY","QCOM","COST","TXN","NEE","MDT","LIN","HON","AMGN","PM","AVGO","BMY","UNP","LOW","UPS","MS","RTX","IBM","GS","CAT",
-             "SCHW","AMD","AMT","AXP","LMT","INTU","BLK","DE","CVS","ISRG","GE","SPGI","PLD","GILD","MDLZ","NOW","ADP","CI","C","SYK","BA",
-             "MO","ZTS","USB","BKNG","MMC","TGT","CB","BDX","CCI","CL","DUK","MMM","SO","CME","PNC","SHW","ICE","APD","EQIX"]
-    try:
-        tickers = yf.download(sp100, period="1d", interval="1h", progress=False, threads=True)
-        latest = tickers["Close"].iloc[-1]
-
-        df = []
-        for sym in sp100:
-            ticker = yf.Ticker(sym)
-            info = ticker.info
-            price = latest[sym]
-            change_pct = info.get("regularMarketChangePercent", 0.0)
-            volume = info.get("volume", 1)
-            mcap = info.get("marketCap", 1)
-            df.append({
-                "symbol": sym,
-                "name": info.get("shortName", sym),
-                "priceUsd": price,
-                "changePercent24Hr": change_pct,
-                "volume24h": volume,
-                "marketCap": mcap
-            })
-
-        return pd.DataFrame(df)
-
-    except Exception as e:
-        st.error(f"Stock API failed: {e}")
-        return pd.DataFrame()
-
-def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
+    payload = r.json()
     rows = []
-    now = datetime.utcnow()
-    total_mcap = data["marketCap"].sum() if "marketCap" in data else 1
+    for item in payload.get("data", []):
+        quote = item["quote"][convert]
+        rows.append({
+            "rank": item.get("cmc_rank"),
+            "name": item.get("name"),
+            "symbol": item.get("symbol"),
+            "price": quote.get("price"),
+            "market_cap": quote.get("market_cap"),
+            "24h %": quote.get("percent_change_24h"),
+            "7d %": quote.get("percent_change_7d"),
+            "volume_24h": quote.get("volume_24h"),
+            "circulating_supply": item.get("circulating_supply"),
+        })
+    df = pd.DataFrame(rows).sort_values("rank")
+    return df
 
-    for _, row in data.iterrows():
-        name = row["name"]
-        symbol = row["symbol"].upper()
-        price = float(row["priceUsd"])
-        change = float(row["changePercent24Hr"])
-        volume = float(row.get("volume24h", 1))
-        mcap = float(row.get("marketCap", 1))
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_price_history_yf(symbol: str, period="1y", interval="1d") -> pd.DataFrame:
+    """Fetch historical price via yfinance, guessing the -USD ticker."""
+    # Common mapping for exceptions if needed
+    # You can extend this mapping if any coin uses a different yfinance symbol.
+    yfin_symbol = f"{symbol}-USD"
+    data = yf.download(yfin_symbol, period=period, interval=interval, progress=False)
+    if data.empty:
+        return pd.DataFrame()
+    data = data.reset_index()[["Date", "Close"]]
+    data.rename(columns={"Close": "close"}, inplace=True)
+    return data
 
-        # --- Factors ---
-        vol_factor = min(abs(change) / 10, 1.0)
-        vol_score = vol_factor * 100
-        volume_norm = np.log1p(volume) / 25
-        volm_score = min(volume_norm, 1.0) * 100
-        mcap_norm = mcap / total_mcap
-        liq_score = min(mcap_norm * 100, 100)
-        trend_score = (np.tanh(change / 5) + 1) * 50
+def money(x):
+    if x is None or pd.isna(x):
+        return "—"
+    if abs(x) >= 1e9:
+        return f"${x/1e9:,.2f}B"
+    if abs(x) >= 1e6:
+        return f"${x/1e6:,.2f}M"
+    return f"${x:,.2f}"
 
-        # Weighted score
-        score = (0.3 * vol_score + 0.3 * volm_score + 0.2 * liq_score + 0.2 * trend_score)
-        score = np.clip(score, 50, 100)
+# ---------------------------
+# UI – Sidebar
+# ---------------------------
+st.sidebar.title("⚙️ Settings")
+currency = st.sidebar.selectbox("Convert currency", ["USD"], index=0, help="CMC free tier typically uses USD.")
+limit = st.sidebar.slider("Number of coins", min_value=10, max_value=100, value=50, step=10)
+history_period = st.sidebar.selectbox("History period (yfinance)", ["3mo", "6mo", "1y", "2y"], index=2)
+history_interval = st.sidebar.selectbox("History interval", ["1d", "1wk"], index=0)
 
-        # --- ATR, SL, TP ---
-        atr = price * abs(change) / 100 / 2
-        sl_price = price - max(1.5 * atr, 0.02 * price)
-        tp1_price = price + max(2.5 * atr, 0.03 * price)
+st.sidebar.caption("Tip: Keep your API key in `.streamlit/secrets.toml` and also in Streamlit Cloud Secrets.")
 
-        sl_pct = (sl_price - price) / price * 100
-        tp1_pct = (tp1_price - price) / price * 100 - REVOLUT_FEES * 100
-        rr = abs(tp1_pct / sl_pct) if sl_pct != 0 else 0
+# ---------------------------
+# UI – Header
+# ---------------------------
+st.title("📈 Crypto Market Dashboard")
+st.caption("Data source: CoinMarketCap (listings), yfinance (price history).")
 
-        # --- Kelly Allocation ---
-        p = score / 100
-        b = rr
-        kelly = max((p * (b + 1) - 1) / b, 0) if b > 0 else 0
-        alloc = round(min(investment_pot * kelly, investment_pot), 2)
-        gain_pot = round(alloc * tp1_pct / 100, 2)
+# ---------------------------
+# Main – Data Fetch
+# ---------------------------
+error_box = st.empty()
+try:
+    with st.spinner("Fetching market data from CoinMarketCap…"):
+        df = fetch_cmc_listings(limit=limit, convert=currency)
+except PermissionError as e:
+    error_box.error(str(e))
+    st.stop()
+except Exception as e:
+    error_box.error(f"Failed to fetch CMC data: {e}")
+    st.stop()
 
-        # --- AI reasoning ---
-        strike = "Yes" if score >= 85 else "No"
-        breakout_time = (now + timedelta(minutes=np.random.randint(30, 180))).strftime("%H:%M")
-        trend = "↑" if change > 0 else ("↓" if change < 0 else "↔")
-        go = "Go" if score >= 85 and trend == "↑" and rr > 1.5 else "No-Go"
-        reasoning = (f"Score {score:.1f}, Vol {change:.2f}%, Vol24h ${volume/1e6:.1f}M, "
-                     f"MCAP ${mcap/1e9:.1f}B, R/R {rr:.2f}, Kelly alloc £{alloc}")
+# ---------------------------
+# Display – Summary KPIs
+# ---------------------------
+top5 = df.head(5)
+total_mcap = df["market_cap"].sum()
+st.subheader("Market Snapshot")
+k1, k2, k3 = st.columns(3)
+with k1:
+    st.metric("Coins loaded", len(df))
+with k2:
+    st.metric("Total Market Cap (loaded)", money(total_mcap))
+with k3:
+    movers = df["24h %"].dropna()
+    avg_24h = movers.mean() if not movers.empty else 0.0
+    st.metric("Avg 24h Change", f"{avg_24h:.2f}%")
 
-        rows.append([
-            None, name, symbol, round(score, 2), strike, breakout_time,
-            round(price, 4), f"{sl_pct:.2f}% (£{alloc * sl_pct/100:.2f}) ({sl_price:.2f})",
-            f"{tp1_pct:.2f}% (£{gain_pot:.2f}) ({tp1_price:.2f})",
-            "0.00%", f"{sl_pct:.2f}% / {tp1_pct:.2f}%", f"£{alloc}",
-            f"{tp1_pct:.2f}% / £{gain_pot}", trend, go, reasoning, sl_price, tp1_price
-        ])
+# ---------------------------
+# Display – Table
+# ---------------------------
+st.subheader("Top Coins")
+display_df = df.copy()
+display_df["price"] = display_df["price"].apply(money)
+display_df["market_cap"] = display_df["market_cap"].apply(money)
+display_df["volume_24h"] = display_df["volume_24h"].apply(money)
+st.dataframe(
+    display_df.set_index("rank"),
+    use_container_width=True,
+    height=480,
+)
 
-    df = pd.DataFrame(rows, columns=[
-        "Rank","Name","Symbol","Breakout Score","⚡ Strike Window","Pred. Breakout (hh:mm)",
-        "Entry Price (USD/GBP)","SL % / £ (Price)","TP1 % / £ (Price)","Trigger %",
-        "Distance to SL / TP (%)","AI Alloc. (£)","Gain Pot. % / £","Trend","Go/No-Go",
-        "AI Reasoning","SL_Price","TP1_Price"
-    ])
-    df["Rank"] = range(1, len(df) + 1)
-    return df.sort_values("Breakout Score", ascending=False).head(100)
+# ---------------------------
+# Display – Chart (Top by Market Cap)
+# ---------------------------
+st.subheader("Market Cap – Top 10")
+chart_df = df.nlargest(10, "market_cap")[["name", "market_cap"]]
+fig = go.Figure(
+    data=[
+        go.Bar(
+            x=chart_df["name"],
+            y=chart_df["market_cap"],
+            text=[money(x) for x in chart_df["market_cap"]],
+            textposition="auto",
+        )
+    ]
+)
+fig.update_layout(
+    xaxis_title="Coin",
+    yaxis_title="Market Cap (USD)",
+    margin=dict(l=20, r=20, t=20, b=20),
+    height=420,
+)
+st.plotly_chart(fig, use_container_width=True)
 
-def plot_chart(symbol, df):
-    """Plot candlestick with SL/TP lines"""
-    try:
-        hist = yf.download(symbol, period="5d", interval="1h")
-        fig = go.Figure(data=[go.Candlestick(
-            x=hist.index,
-            open=hist['Open'],
-            high=hist['High'],
-            low=hist['Low'],
-            close=hist['Close'],
-            name=symbol
-        )])
-        sl = df.loc[df["Symbol"] == symbol, "SL_Price"].values[0]
-        tp = df.loc[df["Symbol"] == symbol, "TP1_Price"].values[0]
-        fig.add_hline(y=sl, line_color="red", annotation_text="SL", annotation_position="bottom right")
-        fig.add_hline(y=tp, line_color="green", annotation_text="TP", annotation_position="top right")
-        st.plotly_chart(fig, use_container_width=True)
-    except:
-        st.warning(f"No chart data for {symbol}")
+# ---------------------------
+# Optional: Price history per symbol
+# ---------------------------
+st.subheader("Price History (yfinance)")
+coin = st.selectbox(
+    "Pick a coin to view its USD price history (via yfinance)",
+    df["symbol"].tolist(),
+)
 
-# ==============================
-# Streamlit Layout
-# ==============================
-st.set_page_config(layout="wide", page_title="AI Breakout Scanner")
+with st.spinner(f"Loading {coin}-USD history…"):
+    hist = fetch_price_history_yf(coin, period=history_period, interval=history_interval)
 
-st.sidebar.header("Settings")
-pot = st.sidebar.number_input("Investment Pot (£)", min_value=10, value=CAPITAL_BASE, step=10)
+if hist.empty:
+    st.info(f"No yfinance data found for {coin}-USD. Try another coin or a different period.")
+else:
+    fig2 = go.Figure(
+        data=[go.Scatter(x=hist["Date"], y=hist["close"], mode="lines", name=f"{coin}-USD")]
+    )
+    fig2.update_layout(
+        xaxis_title="Date",
+        yaxis_title="Price (USD)",
+        margin=dict(l=20, r=20, t=20, b=20),
+        height=420,
+    )
+    st.plotly_chart(fig2, use_container_width=True)
 
-tabs = st.tabs(["Live Crypto", "Live Stocks", "Chart View"])
-
-# --- Live Crypto
-with tabs[0]:
-    st.subheader("Live Crypto Breakouts (Top 100)")
-    crypto = fetch_crypto_data()
-    if not crypto.empty:
-        crypto_table = calc_breakout_table(crypto, pot)
-        display_cols = [
-            "Rank","Name","Symbol","Breakout Score","⚡ Strike Window","Pred. Breakout (hh:mm)",
-            "Entry Price (USD/GBP)","SL % / £ (Price)","TP1 % / £ (Price)","Trigger %",
-            "Distance to SL / TP (%)","AI Alloc. (£)","Gain Pot. % / £","Trend","Go/No-Go","AI Reasoning"
-        ]
-        st.dataframe(crypto_table[display_cols], use_container_width=True)
-        choice = st.selectbox("Select crypto for chart", crypto_table["Symbol"])
-        if choice:
-            plot_chart(choice, crypto_table)
-
-# --- Live Stocks
-with tabs[1]:
-    st.subheader("Live Stock Breakouts (S&P100)")
-    stocks = fetch_stock_data()
-    if not stocks.empty:
-        stock_table = calc_breakout_table(stocks, pot)
-        display_cols = [
-            "Rank","Name","Symbol","Breakout Score","⚡ Strike Window","Pred. Breakout (hh:mm)",
-            "Entry Price (USD/GBP)","SL % / £ (Price)","TP1 % / £ (Price)","Trigger %",
-            "Distance to SL / TP (%)","AI Alloc. (£)","Gain Pot. % / £","Trend","Go/No-Go","AI Reasoning"
-        ]
-        st.dataframe(stock_table[display_cols], use_container_width=True)
-        choice = st.selectbox("Select stock for chart", stock_table["Symbol"])
-        if choice:
-            plot_chart(choice, stock_table)
-
-# --- Chart View
-with tabs[2]:
-    st.info("Use the chart dropdowns in Crypto/Stocks tabs to see AI levels on charts.")
+st.caption("Note: Some crypto tickers may not exist on yfinance; if a series is empty, select a different symbol.")
