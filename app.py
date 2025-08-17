@@ -1,3 +1,7 @@
+# ==============================
+# AI Breakout Scanner (Crypto + Stocks)
+# ==============================
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -16,7 +20,7 @@ PORTFOLIO_FILE = "portfolio.json"
 CAPITAL_BASE = 1000
 REVOLUT_FEES = 0.0099 * 2 + 0.005 * 2  # ~2.98% round trip
 
-CMC_API_KEY = os.getenv("CMC_API_KEY", "fde1ec72-770a-45f1-a2aa-2af4507c9d12")
+CMC_API_KEY = os.getenv("CMC_API_KEY", "YOUR_CMC_API_KEY_HERE")
 
 # ==============================
 # Helpers
