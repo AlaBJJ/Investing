@@ -6,17 +6,17 @@ import numpy as np
 import random
 
 # ================== SETTINGS ==================
-API_KEY = "fde1ec72-770a-45f1-a2aa-2af4507c9d12"  # Replace with your CoinMarketCap API key
+API_KEY = "YOUR_CMC_API_KEY"  # Replace with your CoinMarketCap API key
 API_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-VOLATILITY_THRESHOLD = 5  # Minimum % change 24h to be considered high volatility
+VOLATILITY_THRESHOLD = 5  # Minimum % change in 24h to consider "highly volatile"
 CAPITAL_BASE = 50  # Max base allocation per trade (£)
 REVOLUT_PREMIUM_FEE = 0.0099
 REVOLUT_SPREAD = 0.005
-ROUND_TRIP_COST = (REVOLUT_PREMIUM_FEE + REVOLUT_SPREAD) * 2
+ROUND_TRIP_COST = (REVOLUT_PREMIUM_FEE + REVOLUT_SPREAD) * 2  # ~2.98%
 # ===============================================
 
 st.set_page_config(page_title="AI Predictive Crypto Breakouts", layout="wide")
-st.title("📊 Top 5 High Volatility Breakout Picks – AI Predictive Model (Revolut Premium Fees Applied)")
+st.title("📊 Top 5 High Volatility Breakout Picks – AI Enhanced (Revolut Premium Fees Applied)")
 st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
 # ===== Fetch live crypto data =====
@@ -29,20 +29,19 @@ if response.status_code != 200:
 else:
     data = response.json()["data"]
 
-    # ===== Placeholder Predictive Model =====
-    def ai_predict_breakout_prob(volatility, liquidity, trend_strength):
-        """
-        Simulated AI breakout probability based on volatility, liquidity, and trend.
-        Later replaced with trained ML model.
-        """
-        base = 50 + (volatility * 2) + (liquidity * 10) + (trend_strength * 15)
+    # ===== AI Prediction Functions =====
+    def ai_breakout_score(volatility, liquidity, trend):
+        """AI-style breakout probability"""
+        base = 60 + (volatility * 1.5) + (liquidity * 10) + (trend * 15)
         return min(100, max(50, base + random.uniform(-5, 5)))
 
-    def ai_dynamic_allocation(score, liquidity_weight, rr_ratio):
-        """
-        Adjusts allocation based on conviction, liquidity, and R/R.
-        """
-        return round(CAPITAL_BASE * (score / 100) * liquidity_weight * min(1, rr_ratio / 2), 2)
+    def kelly_allocation(prob, rr_ratio, max_capital):
+        """Kelly Criterion position sizing"""
+        b = rr_ratio
+        p = prob / 100
+        q = 1 - p
+        f_star = (p * (b + 1) - 1) / b if b > 0 else 0
+        return round(max(0, min(f_star, 1)) * max_capital, 2)
 
     rows = []
     for asset in data:
@@ -55,31 +54,31 @@ else:
         if abs(change_24h) >= VOLATILITY_THRESHOLD:
             # ===== Feature Engineering =====
             liquidity_weight = min(1, volume_24h / 1e9)
-            trend_strength = np.tanh(change_24h / 10)
+            trend_strength = np.tanh(change_24h / 10)  # smooth momentum factor
             volatility_factor = abs(change_24h)
 
-            # ===== Predictions =====
-            breakout_score = ai_predict_breakout_prob(volatility_factor, liquidity_weight, trend_strength)
+            # ===== AI Breakout Score =====
+            breakout_score = ai_breakout_score(volatility_factor, liquidity_weight, trend_strength)
 
-            # ===== ATR (approximation) =====
+            # ===== ATR Approximation =====
             atr = price * (volatility_factor / 100) / 2
 
-            # ===== SL & TP =====
+            # ===== SL & TP Placement =====
             sl_price = price - max(1.5 * atr, price * 0.02)
             tp1_price = price + max(2.5 * atr, price * 0.03)
             sl_percent = (sl_price - price) / price * 100
             tp1_percent = (tp1_price - price) / price * 100
             rr_ratio = abs(tp1_percent / sl_percent)
 
-            # ===== Allocation =====
-            ai_alloc = ai_dynamic_allocation(breakout_score, liquidity_weight, rr_ratio)
+            # ===== Kelly Allocation =====
+            ai_alloc = kelly_allocation(breakout_score, rr_ratio, CAPITAL_BASE)
 
-            # ===== Net After Fees =====
+            # ===== Fee-Adjusted Gains =====
             net_tp1_percent = tp1_percent - (ROUND_TRIP_COST * 100)
             net_tp1_value = ai_alloc * (net_tp1_percent / 100)
 
             # ===== Trigger & Distance =====
-            trigger_price = price
+            trigger_price = price  # Later replace with AI trigger model
             trigger_percent = ((price - trigger_price) / trigger_price) * 100
             distance_to_sl_percent = ((sl_price - price) / price) * 100
             distance_to_tp_percent = ((tp1_price - price) / price) * 100
@@ -91,10 +90,11 @@ else:
             # ===== Trend =====
             trend_symbol = "↑" if change_24h > 0 else "↓" if change_24h < 0 else "↔"
 
-            # ===== Reasoning =====
+            # ===== AI Reasoning =====
             reasoning = (
-                f"Prob {breakout_score:.1f}%, Vol {abs(change_24h):.1f}%, "
-                f"Liquidity ${volume_24h/1e6:.1f}M, ATR {atr:.2f}, R/R {rr_ratio:.2f}."
+                f"Score {breakout_score:.1f}%, R/R {rr_ratio:.2f}, ATR {atr:.2f}, "
+                f"Liquidity ${volume_24h/1e6:.1f}M, Vol {abs(change_24h):.1f}%. "
+                f"Kelly alloc {ai_alloc}£."
             )
 
             rows.append({
