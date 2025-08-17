@@ -16,25 +16,15 @@ import plotly.graph_objects as go
 # Config
 # ==============================
 REFRESH_INTERVAL = 60
-PORTFOLIO_FILE = "portfolio.json"
 CAPITAL_BASE = 1000
 REVOLUT_FEES = 0.0099 * 2 + 0.005 * 2  # ~2.98% round trip
 
-CMC_API_KEY = os.getenv("CMC_API_KEY", "fde1ec72-770a-45f1-a2aa-2af4507c9d12")
+# --- CoinMarketCap API Key ---
+CMC_API_KEY = os.getenv("CMC_API_KEY", "YOUR_CMC_API_KEY_HERE")
 
 # ==============================
 # Helpers
 # ==============================
-def load_portfolio():
-    if os.path.exists(PORTFOLIO_FILE):
-        with open(PORTFOLIO_FILE, "r") as f:
-            return json.load(f)
-    return []
-
-def save_portfolio(data):
-    with open(PORTFOLIO_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
 def fetch_crypto_data(limit=100):
     """Fetch top 100 cryptos from CoinMarketCap"""
     url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
@@ -199,14 +189,12 @@ with tabs[0]:
     crypto = fetch_crypto_data()
     if not crypto.empty:
         crypto_table = calc_breakout_table(crypto, pot)
-
         display_cols = [
             "Rank","Name","Symbol","Breakout Score","⚡ Strike Window","Pred. Breakout (hh:mm)",
             "Entry Price (USD/GBP)","SL % / £ (Price)","TP1 % / £ (Price)","Trigger %",
             "Distance to SL / TP (%)","AI Alloc. (£)","Gain Pot. % / £","Trend","Go/No-Go","AI Reasoning"
         ]
         st.dataframe(crypto_table[display_cols], use_container_width=True)
-
         choice = st.selectbox("Select crypto for chart", crypto_table["Symbol"])
         if choice:
             plot_chart(choice, crypto_table)
@@ -217,14 +205,12 @@ with tabs[1]:
     stocks = fetch_stock_data()
     if not stocks.empty:
         stock_table = calc_breakout_table(stocks, pot)
-
         display_cols = [
             "Rank","Name","Symbol","Breakout Score","⚡ Strike Window","Pred. Breakout (hh:mm)",
             "Entry Price (USD/GBP)","SL % / £ (Price)","TP1 % / £ (Price)","Trigger %",
             "Distance to SL / TP (%)","AI Alloc. (£)","Gain Pot. % / £","Trend","Go/No-Go","AI Reasoning"
         ]
         st.dataframe(stock_table[display_cols], use_container_width=True)
-
         choice = st.selectbox("Select stock for chart", stock_table["Symbol"])
         if choice:
             plot_chart(choice, stock_table)
