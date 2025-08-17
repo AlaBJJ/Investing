@@ -28,7 +28,7 @@ def save_portfolio(data):
         json.dump(data, f, indent=2)
 
 def fetch_crypto_data():
-    """Get crypto prices (CoinMarketCap free API as placeholder)."""
+    """Get crypto prices (CoinCap free API as placeholder)."""
     url = "https://api.coincap.io/v2/assets"
     try:
         resp = requests.get(url, timeout=10).json()
@@ -41,7 +41,7 @@ def fetch_crypto_data():
         return pd.DataFrame()
 
 def fetch_stock_data(symbols=["AAPL", "MSFT", "TSLA"]):
-    """Yahoo finance fallback via yfinance would be better, here dummy."""
+    """Dummy stock fetcher (replace with yfinance for real data)."""
     return pd.DataFrame({
         "symbol": symbols,
         "price": np.random.uniform(100, 300, len(symbols)),
@@ -95,6 +95,32 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE, currency="USD"):
     df["Rank"] = range(1, len(df) + 1)
     return df.sort_values("Breakout Score", ascending=False).head(5)
 
+def build_ai_portfolio(df):
+    """Take breakout table and simulate positions AI would enter."""
+    portfolio = []
+    for _, row in df.iterrows():
+        if row["Go/No-Go"] == "Go":
+            entry = row["Entry Price (USD/GBP)"]
+            alloc_str = row["AI Alloc. (£)"].replace("£", "")
+            try:
+                size = float(alloc_str)
+            except:
+                size = 0
+            current = entry  # assume entry = now
+            value = size
+            pl = 0
+            pl_pct = 0
+            sl_price = float(row["SL % / £ (Price)"].split("(")[-1].replace(")", ""))
+            tp1_price = float(row["TP1 % / £ (Price)"].split("(")[-1].replace(")", ""))
+            portfolio.append([
+                row["Symbol"], entry, current, size, value, pl, pl_pct,
+                sl_price, tp1_price,
+                f"{(tp1_price-current)/current*100:.2f}%", "Open"
+            ])
+    return pd.DataFrame(portfolio, columns=[
+        "Symbol","Entry","Current","Size (£)","Value","P/L £","P/L %","SL Price","TP1 Price","% to TP1","Status"
+    ])
+
 # ==============================
 # Streamlit Layout
 # ==============================
@@ -112,16 +138,16 @@ with tabs[0]:
     st.subheader("Live Crypto Breakouts")
     crypto = fetch_crypto_data()
     if not crypto.empty:
-        table = calc_breakout_table(crypto, pot, currency)
-        st.dataframe(table, use_container_width=True)
+        crypto_table = calc_breakout_table(crypto, pot, currency)
+        st.dataframe(crypto_table, use_container_width=True)
         st.caption(f"Last updated: {datetime.utcnow().strftime('%H:%M:%S')} UTC")
 
 # --- Live Stocks
 with tabs[1]:
     st.subheader("Live Stock Breakouts")
     stocks = fetch_stock_data()
-    table = calc_breakout_table(stocks, pot, currency)
-    st.dataframe(table, use_container_width=True)
+    stock_table = calc_breakout_table(stocks, pot, currency)
+    st.dataframe(stock_table, use_container_width=True)
 
 # --- Simulation Tabs
 with tabs[2]:
@@ -181,5 +207,11 @@ with tabs[4]:
 # --- AI Simulated Tracker
 with tabs[5]:
     st.subheader("AI Simulated Tracker")
-    st.info("This will display AI’s simulated holdings (not implemented fully yet).")
-
+    if 'crypto_table' in locals():
+        ai_df = build_ai_portfolio(crypto_table)
+        if not ai_df.empty:
+            st.dataframe(ai_df, use_container_width=True)
+        else:
+            st.info("No AI trades triggered (all No-Go).")
+    else:
+        st.warning("Run Live Crypto tab first to generate AI portfolio.")
