@@ -6,7 +6,7 @@ import numpy as np
 import random
 
 # ================== SETTINGS ==================
-API_KEY = "YOUR_CMC_API_KEY"  # Replace with your CoinMarketCap API key
+API_KEY = "fde1ec72-770a-45f1-a2aa-2af4507c9d12"  # Replace with your CoinMarketCap API key
 API_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
 VOLATILITY_THRESHOLD = 5  # Minimum % change in 24h to consider "highly volatile"
 CAPITAL_BASE = 50  # Max base allocation per trade (£)
