@@ -1,5 +1,5 @@
 # ==============================
-# AI Breakout Scanner (Crypto + Stocks) - Ultimate Safe Version
+# AI Breakout Scanner (Crypto + Stocks)
 # ==============================
 
 import streamlit as st
@@ -19,10 +19,15 @@ from sklearn.preprocessing import StandardScaler
 REFRESH_INTERVAL = 60
 CAPITAL_BASE = 1000
 REVOLUT_FEES = 0.0099 * 2 + 0.005 * 2  # ~2.98% round trip
-CMC_API_KEY = os.getenv("CMC_API_KEY", "YOUR_CMC_API_KEY_HERE")
+
+# --- CoinMarketCap API Key ---
+if "CMC_API_KEY" in st.secrets:
+    CMC_API_KEY = st.secrets["CMC_API_KEY"]
+else:
+    CMC_API_KEY = os.getenv("CMC_API_KEY", "YOUR_CMC_API_KEY_HERE")
 
 # ==============================
-# ML Model Trainer (Safe)
+# ML Model Training (Safe)
 # ==============================
 def train_ml_model(symbol="BTC-USD"):
     """Train ML model on historical data for given symbol"""
@@ -31,33 +36,33 @@ def train_ml_model(symbol="BTC-USD"):
         if data.empty:
             return None, None
 
-        # --- Feature Engineering ---
+        # Features
         data["return_1h"] = data["Close"].pct_change()
         data["return_24h"] = data["Close"].pct_change(24)
         data["volatility"] = (data["High"] - data["Low"]) / data["Close"]
         data["volume_change"] = data["Volume"].pct_change()
         data["ema_trend"] = data["Close"] / data["Close"].ewm(span=20).mean() - 1
 
-        # Target: breakout if return next 24h > 5%
+        # Target: breakout if next 24h > 5%
         data["target"] = (data["Close"].shift(-24) / data["Close"] - 1 > 0.05).astype(int)
 
         features = ["return_1h","return_24h","volatility","volume_change","ema_trend"]
         X = data[features]
         y = data["target"]
 
-        # --- Clean data ---
+        # Clean data
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
         y = y.loc[X.index]
 
         if X.empty or y.empty:
             return None, None
 
-        # Train/test split
+        # Split
         split = int(len(X) * 0.8)
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
 
-        # Scale features
+        # Scale
         scaler = StandardScaler()
         X_train = scaler.fit_transform(X_train)
         X_test = scaler.transform(X_test)
@@ -75,9 +80,10 @@ def train_ml_model(symbol="BTC-USD"):
 ML_MODEL, SCALER = train_ml_model("BTC-USD")
 
 # ==============================
-# Data Fetchers
+# Helpers
 # ==============================
 def fetch_crypto_data(limit=100):
+    """Fetch top 100 cryptos from CoinMarketCap"""
     url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
     headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
     params = {"start": "1", "limit": str(limit), "convert": "USD"}
@@ -86,7 +92,9 @@ def fetch_crypto_data(limit=100):
         resp = requests.get(url, headers=headers, params=params, timeout=10)
         resp.raise_for_status()
         data = resp.json()
+
         df = pd.DataFrame([{
+            "id": asset["id"],
             "symbol": asset["symbol"],
             "name": asset["name"],
             "priceUsd": asset["quote"]["USD"]["price"],
@@ -94,16 +102,28 @@ def fetch_crypto_data(limit=100):
             "volume24h": asset["quote"]["USD"]["volume_24h"],
             "marketCap": asset["quote"]["USD"]["market_cap"]
         } for asset in data["data"]])
+
         return df
+
     except Exception as e:
         st.error(f"CMC API failed: {e}")
         return pd.DataFrame()
 
 def fetch_stock_data():
-    sp100 = ["AAPL","MSFT","AMZN","TSLA","GOOGL","BRK-B","NVDA","META","JNJ","XOM"]
+    """Fetch S&P100 stocks with yfinance"""
+    sp100 = ["AAPL","MSFT","AMZN","TSLA","GOOGL","BRK-B","NVDA","META","JNJ","XOM",
+             "JPM","V","PG","UNH","HD","MA","PFE","CVX","ABBV","BAC","KO","PEP","MRK",
+             "DIS","CSCO","VZ","WMT","ADBE","NFLX","T","INTC","CRM","CMCSA","ABT","PYPL",
+             "NKE","ORCL","ACN","MCD","TMO","DHR","LLY","QCOM","COST","TXN","NEE","MDT",
+             "LIN","HON","AMGN","PM","AVGO","BMY","UNP","LOW","UPS","MS","RTX","IBM","GS",
+             "CAT","SCHW","AMD","AMT","AXP","LMT","INTU","BLK","DE","CVS","ISRG","GE","SPGI",
+             "PLD","GILD","MDLZ","NOW","ADP","CI","C","SYK","BA","MO","ZTS","USB","BKNG",
+             "MMC","TGT","CB","BDX","CCI","CL","DUK","MMM","SO","CME","PNC","SHW","ICE","APD","EQIX"]
+
     try:
         tickers = yf.download(sp100, period="1d", interval="1h", progress=False, threads=True)
         latest = tickers["Close"].iloc[-1]
+
         df = []
         for sym in sp100:
             ticker = yf.Ticker(sym)
@@ -120,14 +140,13 @@ def fetch_stock_data():
                 "volume24h": volume,
                 "marketCap": mcap
             })
+
         return pd.DataFrame(df)
+
     except Exception as e:
         st.error(f"Stock API failed: {e}")
         return pd.DataFrame()
 
-# ==============================
-# AI Calculation Engine
-# ==============================
 def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
     rows = []
     now = datetime.utcnow()
@@ -141,27 +160,24 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
         volume = float(row.get("volume24h", 1))
         mcap = float(row.get("marketCap", 1))
 
-        # --- AI Breakout Score ---
-        if ML_MODEL and SCALER is not None:
-            feat = np.array([[change/100, change/100, (row["priceUsd"]*0.02)/price, volume/1e9, change/100]])
-            feat = SCALER.transform(feat)
-            prob = ML_MODEL.predict_proba(feat)[0][1]
-            score = prob * 100
-        else:
-            vol_factor = min(abs(change) / 10, 1.0)
-            vol_score = vol_factor * 100
-            volume_norm = np.log1p(volume) / 25
-            volm_score = min(volume_norm, 1.0) * 100
-            mcap_norm = mcap / total_mcap
-            liq_score = min(mcap_norm * 100, 100)
-            trend_score = (np.tanh(change / 5) + 1) * 50
-            score = (0.3 * vol_score + 0.3 * volm_score + 0.2 * liq_score + 0.2 * trend_score)
-            score = np.clip(score, 50, 100)
+        # --- Heuristic factors ---
+        vol_factor = min(abs(change) / 10, 1.0)
+        vol_score = vol_factor * 100
+        volume_norm = np.log1p(volume) / 25
+        volm_score = min(volume_norm, 1.0) * 100
+        mcap_norm = mcap / total_mcap
+        liq_score = min(mcap_norm * 100, 100)
+        trend_score = (np.tanh(change / 5) + 1) * 50
+
+        # Weighted score
+        score = (0.3 * vol_score + 0.3 * volm_score + 0.2 * liq_score + 0.2 * trend_score)
+        score = np.clip(score, 50, 100)
 
         # --- ATR, SL, TP ---
         atr = price * abs(change) / 100 / 2
         sl_price = price - max(1.5 * atr, 0.02 * price)
         tp1_price = price + max(2.5 * atr, 0.03 * price)
+
         sl_pct = (sl_price - price) / price * 100
         tp1_pct = (tp1_price - price) / price * 100 - REVOLUT_FEES * 100
         rr = abs(tp1_pct / sl_pct) if sl_pct != 0 else 0
@@ -173,7 +189,7 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
         alloc = round(min(investment_pot * kelly, investment_pot), 2)
         gain_pot = round(alloc * tp1_pct / 100, 2)
 
-        # --- AI Reasoning ---
+        # --- AI reasoning ---
         strike = "Yes" if score >= 85 else "No"
         breakout_time = (now + timedelta(minutes=np.random.randint(30, 180))).strftime("%H:%M")
         trend = "↑" if change > 0 else ("↓" if change < 0 else "↔")
@@ -198,10 +214,8 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
     df["Rank"] = range(1, len(df) + 1)
     return df.sort_values("Breakout Score", ascending=False).head(100)
 
-# ==============================
-# Charting
-# ==============================
 def plot_chart(symbol, df):
+    """Plot candlestick with SL/TP lines"""
     try:
         hist = yf.download(symbol, period="5d", interval="1h")
         fig = go.Figure(data=[go.Candlestick(
