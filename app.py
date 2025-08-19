@@ -10,8 +10,6 @@ import os
 from datetime import datetime, timedelta
 import yfinance as yf
 import plotly.graph_objects as go
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.preprocessing import StandardScaler
 
 # ==============================
 # Config
@@ -27,73 +25,28 @@ else:
     CMC_API_KEY = os.getenv("CMC_API_KEY", "YOUR_CMC_API_KEY_HERE")
 
 # ==============================
-# ML Model Training (Safe)
-# ==============================
-def train_ml_model(symbol="BTC-USD"):
-    """Train ML model on historical data for given symbol"""
-    try:
-        data = yf.download(symbol, period="60d", interval="1h")
-        if data.empty:
-            return None, None
-
-        # Features
-        data["return_1h"] = data["Close"].pct_change()
-        data["return_24h"] = data["Close"].pct_change(24)
-        data["volatility"] = (data["High"] - data["Low"]) / data["Close"]
-        data["volume_change"] = data["Volume"].pct_change()
-        data["ema_trend"] = data["Close"] / data["Close"].ewm(span=20).mean() - 1
-
-        # Target: breakout if next 24h > 5%
-        data["target"] = (data["Close"].shift(-24) / data["Close"] - 1 > 0.05).astype(int)
-
-        features = ["return_1h","return_24h","volatility","volume_change","ema_trend"]
-        X = data[features]
-        y = data["target"]
-
-        # Clean data
-        X = X.replace([np.inf, -np.inf], np.nan).dropna()
-        y = y.loc[X.index]
-
-        if X.empty or y.empty:
-            return None, None
-
-        # Split
-        split = int(len(X) * 0.8)
-        X_train, X_test = X[:split], X[split:]
-        y_train, y_test = y[:split], y[split:]
-
-        # Scale
-        scaler = StandardScaler()
-        X_train = scaler.fit_transform(X_train)
-        X_test = scaler.transform(X_test)
-
-        # Train model
-        model = GradientBoostingClassifier(n_estimators=200, max_depth=3)
-        model.fit(X_train, y_train)
-
-        return model, scaler
-
-    except Exception as e:
-        st.error(f"ML training failed: {e}")
-        return None, None
-
-ML_MODEL, SCALER = train_ml_model("BTC-USD")
-
-# ==============================
 # Helpers
 # ==============================
 def fetch_crypto_data(limit=100):
-    """Fetch top 100 cryptos from CoinMarketCap"""
+    """Fetch top cryptos from CoinMarketCap"""
+    if not CMC_API_KEY or CMC_API_KEY == "YOUR_CMC_API_KEY_HERE":
+        st.error("❌ No valid CoinMarketCap API key found. Please add CMC_API_KEY to Streamlit secrets.")
+        return pd.DataFrame()
+
     url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
     headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
     params = {"start": "1", "limit": str(limit), "convert": "USD"}
 
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=10)
+        if resp.status_code == 401:
+            st.error("❌ Unauthorized: Your CoinMarketCap API key is invalid or not authorized for this endpoint.")
+            return pd.DataFrame()
+
         resp.raise_for_status()
         data = resp.json()
 
-        df = pd.DataFrame([{
+        return pd.DataFrame([{
             "id": asset["id"],
             "symbol": asset["symbol"],
             "name": asset["name"],
@@ -103,25 +56,19 @@ def fetch_crypto_data(limit=100):
             "marketCap": asset["quote"]["USD"]["market_cap"]
         } for asset in data["data"]])
 
-        return df
-
     except Exception as e:
         st.error(f"CMC API failed: {e}")
         return pd.DataFrame()
 
 def fetch_stock_data():
-    """Fetch S&P100 stocks with yfinance"""
-    sp100 = ["AAPL","MSFT","AMZN","TSLA","GOOGL","BRK-B","NVDA","META","JNJ","XOM",
-             "JPM","V","PG","UNH","HD","MA","PFE","CVX","ABBV","BAC","KO","PEP","MRK",
-             "DIS","CSCO","VZ","WMT","ADBE","NFLX","T","INTC","CRM","CMCSA","ABT","PYPL",
-             "NKE","ORCL","ACN","MCD","TMO","DHR","LLY","QCOM","COST","TXN","NEE","MDT",
-             "LIN","HON","AMGN","PM","AVGO","BMY","UNP","LOW","UPS","MS","RTX","IBM","GS",
-             "CAT","SCHW","AMD","AMT","AXP","LMT","INTU","BLK","DE","CVS","ISRG","GE","SPGI",
-             "PLD","GILD","MDLZ","NOW","ADP","CI","C","SYK","BA","MO","ZTS","USB","BKNG",
-             "MMC","TGT","CB","BDX","CCI","CL","DUK","MMM","SO","CME","PNC","SHW","ICE","APD","EQIX"]
-
+    """Fetch top 100 stocks (S&P100) using yfinance"""
+    sp100 = ["AAPL","MSFT","AMZN","TSLA","GOOGL","BRK-B","NVDA","META","JNJ","XOM","JPM","V","PG","UNH","HD","MA","PFE","CVX","ABBV","BAC",
+             "KO","PEP","MRK","DIS","CSCO","VZ","WMT","ADBE","NFLX","T","INTC","CRM","CMCSA","ABT","PYPL","NKE","ORCL","ACN","MCD","TMO",
+             "DHR","LLY","QCOM","COST","TXN","NEE","MDT","LIN","HON","AMGN","PM","AVGO","BMY","UNP","LOW","UPS","MS","RTX","IBM","GS","CAT",
+             "SCHW","AMD","AMT","AXP","LMT","INTU","BLK","DE","CVS","ISRG","GE","SPGI","PLD","GILD","MDLZ","NOW","ADP","CI","C","SYK","BA",
+             "MO","ZTS","USB","BKNG","MMC","TGT","CB","BDX","CCI","CL","DUK","MMM","SO","CME","PNC","SHW","ICE","APD","EQIX"]
     try:
-        tickers = yf.download(sp100, period="1d", interval="1h", progress=False, threads=True)
+        tickers = yf.download(sp100, period="1d", interval="1h", progress=False, threads=True, auto_adjust=False)
         latest = tickers["Close"].iloc[-1]
 
         df = []
@@ -160,7 +107,7 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
         volume = float(row.get("volume24h", 1))
         mcap = float(row.get("marketCap", 1))
 
-        # --- Heuristic factors ---
+        # --- Factors ---
         vol_factor = min(abs(change) / 10, 1.0)
         vol_score = vol_factor * 100
         volume_norm = np.log1p(volume) / 25
@@ -217,7 +164,7 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
 def plot_chart(symbol, df):
     """Plot candlestick with SL/TP lines"""
     try:
-        hist = yf.download(symbol, period="5d", interval="1h")
+        hist = yf.download(symbol, period="5d", interval="1h", auto_adjust=False)
         fig = go.Figure(data=[go.Candlestick(
             x=hist.index,
             open=hist['Open'],
