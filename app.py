@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import requests
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import yfinance as yf
 import plotly.graph_objects as go
 
@@ -21,32 +21,29 @@ REVOLUT_FEES = 0.0099 * 2 + 0.005 * 2  # ~2.98% round trip
 # --- CoinMarketCap API Key ---
 if "CMC_API_KEY" in st.secrets:
     CMC_API_KEY = st.secrets["CMC_API_KEY"]
+    st.sidebar.success(f"🔑 API key loaded: {CMC_API_KEY[:4]}***")
 else:
     CMC_API_KEY = os.getenv("CMC_API_KEY", "YOUR_CMC_API_KEY_HERE")
+    if CMC_API_KEY and CMC_API_KEY != "YOUR_CMC_API_KEY_HERE":
+        st.sidebar.success(f"🔑 API key from ENV: {CMC_API_KEY[:4]}***")
+    else:
+        st.sidebar.error("❌ No valid API key found. Please set in .streamlit/secrets.toml or ENV.")
 
 # ==============================
 # Helpers
 # ==============================
 def fetch_crypto_data(limit=100):
-    """Fetch top cryptos from CoinMarketCap"""
-    if not CMC_API_KEY or CMC_API_KEY == "YOUR_CMC_API_KEY_HERE":
-        st.error("❌ No valid CoinMarketCap API key found. Please add CMC_API_KEY to Streamlit secrets.")
-        return pd.DataFrame()
-
+    """Fetch top 100 cryptos from CoinMarketCap"""
     url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
     headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
     params = {"start": "1", "limit": str(limit), "convert": "USD"}
 
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=10)
-        if resp.status_code == 401:
-            st.error("❌ Unauthorized: Your CoinMarketCap API key is invalid or not authorized for this endpoint.")
-            return pd.DataFrame()
-
         resp.raise_for_status()
         data = resp.json()
 
-        return pd.DataFrame([{
+        df = pd.DataFrame([{
             "id": asset["id"],
             "symbol": asset["symbol"],
             "name": asset["name"],
@@ -56,9 +53,12 @@ def fetch_crypto_data(limit=100):
             "marketCap": asset["quote"]["USD"]["market_cap"]
         } for asset in data["data"]])
 
+        return df
+
     except Exception as e:
         st.error(f"CMC API failed: {e}")
         return pd.DataFrame()
+
 
 def fetch_stock_data():
     """Fetch top 100 stocks (S&P100) using yfinance"""
@@ -94,9 +94,10 @@ def fetch_stock_data():
         st.error(f"Stock API failed: {e}")
         return pd.DataFrame()
 
+
 def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
     rows = []
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)  # ✅ Fixed deprecation warning
     total_mcap = data["marketCap"].sum() if "marketCap" in data else 1
 
     for _, row in data.iterrows():
@@ -160,6 +161,7 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
     ])
     df["Rank"] = range(1, len(df) + 1)
     return df.sort_values("Breakout Score", ascending=False).head(100)
+
 
 def plot_chart(symbol, df):
     """Plot candlestick with SL/TP lines"""
