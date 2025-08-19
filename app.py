@@ -18,57 +18,108 @@ REFRESH_INTERVAL = 60
 CAPITAL_BASE = 1000
 REVOLUT_FEES = 0.0099 * 2 + 0.005 * 2  # ~2.98% round trip
 
-# --- CoinMarketCap API Key ---
-if "CMC_API_KEY" in st.secrets:
-    CMC_API_KEY = st.secrets["CMC_API_KEY"]
-    st.sidebar.success(f"🔑 API key loaded: {CMC_API_KEY[:4]}***")
-else:
-    CMC_API_KEY = os.getenv("CMC_API_KEY", "YOUR_CMC_API_KEY_HERE")
-    if CMC_API_KEY and CMC_API_KEY != "YOUR_CMC_API_KEY_HERE":
-        st.sidebar.success(f"🔑 API key from ENV: {CMC_API_KEY[:4]}***")
-    else:
-        st.sidebar.error("❌ No valid API key found. Please set in .streamlit/secrets.toml or ENV.")
+# ==============================
+# Sidebar API Keys
+# ==============================
+st.sidebar.subheader("🔑 API Keys")
+st.session_state["CMC_API_KEY"] = st.sidebar.text_input("CoinMarketCap Key", type="password")
+st.session_state["CG_KEY"] = st.sidebar.text_input("CoinGecko Key (optional)", type="password")
+st.session_state["AV_KEY"] = st.sidebar.text_input("AlphaVantage Key (optional)", type="password")
+st.session_state["YF_KEY"] = st.sidebar.text_input("YahooFinance Key (optional)", type="password")
 
 # ==============================
-# Helpers
+# Multi-API Fused Fetcher
 # ==============================
-def fetch_crypto_data(limit=100):
-    """Fetch top 100 cryptos from CoinMarketCap"""
-    url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-    headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
-    params = {"start": "1", "limit": str(limit), "convert": "USD"}
+def fetch_fused_crypto(limit=100):
+    results = []
+    cmc_data, cg_data = {}, {}
 
+    # --- CoinMarketCap ---
+    if st.session_state.get("CMC_API_KEY"):
+        try:
+            url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
+            headers = {"X-CMC_PRO_API_KEY": st.session_state["CMC_API_KEY"]}
+            params = {"start": "1", "limit": str(limit), "convert": "USD"}
+            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            resp.raise_for_status()
+            for asset in resp.json()["data"]:
+                cmc_data[asset["symbol"].upper()] = {
+                    "name": asset["name"],
+                    "price": asset["quote"]["USD"]["price"],
+                    "change": asset["quote"]["USD"]["percent_change_24h"],
+                    "volume": asset["quote"]["USD"]["volume_24h"],
+                    "mcap": asset["quote"]["USD"]["market_cap"]
+                }
+        except Exception as e:
+            st.warning(f"CMC fetch failed: {e}")
+
+    # --- CoinGecko ---
     try:
-        resp = requests.get(url, headers=headers, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-
-        df = pd.DataFrame([{
-            "id": asset["id"],
-            "symbol": asset["symbol"],
-            "name": asset["name"],
-            "priceUsd": asset["quote"]["USD"]["price"],
-            "changePercent24Hr": asset["quote"]["USD"]["percent_change_24h"],
-            "volume24h": asset["quote"]["USD"]["volume_24h"],
-            "marketCap": asset["quote"]["USD"]["market_cap"]
-        } for asset in data["data"]])
-
-        return df
-
+        url = "https://api.coingecko.com/api/v3/coins/markets"
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": limit,
+            "page": 1,
+            "sparkline": False
+        }
+        resp = requests.get(url, params=params, timeout=10).json()
+        for asset in resp:
+            cg_data[asset["symbol"].upper()] = {
+                "name": asset["name"],
+                "price": asset["current_price"],
+                "change": asset["price_change_percentage_24h"],
+                "volume": asset["total_volume"],
+                "mcap": asset["market_cap"]
+            }
     except Exception as e:
-        st.error(f"CMC API failed: {e}")
-        return pd.DataFrame()
+        st.warning(f"CoinGecko fetch failed: {e}")
 
+    # --- Fusion ---
+    all_syms = set(cmc_data.keys()) | set(cg_data.keys())
+    for sym in all_syms:
+        name = cmc_data.get(sym, {}).get("name") or cg_data.get(sym, {}).get("name") or sym
 
+        price_vals, change_vals, volume_vals, mcap_vals = [], [], [], []
+
+        if sym in cmc_data:
+            price_vals.append(cmc_data[sym]["price"])
+            change_vals.append(cmc_data[sym]["change"])
+            volume_vals.append(cmc_data[sym]["volume"])
+            mcap_vals.append(cmc_data[sym]["mcap"])
+        if sym in cg_data:
+            price_vals.append(cg_data[sym]["price"])
+            change_vals.append(cg_data[sym]["change"])
+            volume_vals.append(cg_data[sym]["volume"])
+            mcap_vals.append(cg_data[sym]["mcap"])
+
+        if not price_vals:
+            continue
+
+        fused_price = np.mean(price_vals)
+        fused_change = np.median(change_vals)
+        fused_vol = np.mean(volume_vals)
+        fused_mcap = np.mean(mcap_vals)
+
+        results.append({
+            "symbol": sym,
+            "name": name,
+            "priceUsd": fused_price,
+            "changePercent24Hr": fused_change,
+            "volume24h": fused_vol,
+            "marketCap": fused_mcap
+        })
+
+    return pd.DataFrame(results)
+
+# ==============================
+# Stocks (S&P100)
+# ==============================
 def fetch_stock_data():
-    """Fetch top 100 stocks (S&P100) using yfinance"""
-    sp100 = ["AAPL","MSFT","AMZN","TSLA","GOOGL","BRK-B","NVDA","META","JNJ","XOM","JPM","V","PG","UNH","HD","MA","PFE","CVX","ABBV","BAC",
-             "KO","PEP","MRK","DIS","CSCO","VZ","WMT","ADBE","NFLX","T","INTC","CRM","CMCSA","ABT","PYPL","NKE","ORCL","ACN","MCD","TMO",
-             "DHR","LLY","QCOM","COST","TXN","NEE","MDT","LIN","HON","AMGN","PM","AVGO","BMY","UNP","LOW","UPS","MS","RTX","IBM","GS","CAT",
-             "SCHW","AMD","AMT","AXP","LMT","INTU","BLK","DE","CVS","ISRG","GE","SPGI","PLD","GILD","MDLZ","NOW","ADP","CI","C","SYK","BA",
-             "MO","ZTS","USB","BKNG","MMC","TGT","CB","BDX","CCI","CL","DUK","MMM","SO","CME","PNC","SHW","ICE","APD","EQIX"]
+    sp100 = ["AAPL","MSFT","AMZN","TSLA","GOOGL","BRK-B","NVDA","META","JNJ","XOM","JPM","V","PG","UNH","HD","MA",
+             "PFE","CVX","ABBV","BAC","KO","PEP","MRK","DIS","CSCO","VZ","WMT","ADBE","NFLX","T","INTC","CRM","CMCSA"]
     try:
-        tickers = yf.download(sp100, period="1d", interval="1h", progress=False, threads=True, auto_adjust=False)
+        tickers = yf.download(sp100, period="1d", interval="1h", progress=False, threads=True)
         latest = tickers["Close"].iloc[-1]
 
         df = []
@@ -87,17 +138,17 @@ def fetch_stock_data():
                 "volume24h": volume,
                 "marketCap": mcap
             })
-
         return pd.DataFrame(df)
-
     except Exception as e:
         st.error(f"Stock API failed: {e}")
         return pd.DataFrame()
 
-
+# ==============================
+# AI Breakout Model
+# ==============================
 def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
     rows = []
-    now = datetime.now(timezone.utc)  # ✅ Fixed deprecation warning
+    now = datetime.now(timezone.utc)
     total_mcap = data["marketCap"].sum() if "marketCap" in data else 1
 
     for _, row in data.iterrows():
@@ -117,7 +168,6 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
         liq_score = min(mcap_norm * 100, 100)
         trend_score = (np.tanh(change / 5) + 1) * 50
 
-        # Weighted score
         score = (0.3 * vol_score + 0.3 * volm_score + 0.2 * liq_score + 0.2 * trend_score)
         score = np.clip(score, 50, 100)
 
@@ -137,7 +187,6 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
         alloc = round(min(investment_pot * kelly, investment_pot), 2)
         gain_pot = round(alloc * tp1_pct / 100, 2)
 
-        # --- AI reasoning ---
         strike = "Yes" if score >= 85 else "No"
         breakout_time = (now + timedelta(minutes=np.random.randint(30, 180))).strftime("%H:%M")
         trend = "↑" if change > 0 else ("↓" if change < 0 else "↔")
@@ -150,23 +199,23 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
             round(price, 4), f"{sl_pct:.2f}% (£{alloc * sl_pct/100:.2f}) ({sl_price:.2f})",
             f"{tp1_pct:.2f}% (£{gain_pot:.2f}) ({tp1_price:.2f})",
             "0.00%", f"{sl_pct:.2f}% / {tp1_pct:.2f}%", f"£{alloc}",
-            f"{tp1_pct:.2f}% / £{gain_pot}", trend, go, reasoning, sl_price, tp1_price
+            f"{tp1_pct:.2f}% / £{gain_pot}", trend, go, reasoning
         ])
 
     df = pd.DataFrame(rows, columns=[
         "Rank","Name","Symbol","Breakout Score","⚡ Strike Window","Pred. Breakout (hh:mm)",
         "Entry Price (USD/GBP)","SL % / £ (Price)","TP1 % / £ (Price)","Trigger %",
-        "Distance to SL / TP (%)","AI Alloc. (£)","Gain Pot. % / £","Trend","Go/No-Go",
-        "AI Reasoning","SL_Price","TP1_Price"
+        "Distance to SL / TP (%)","AI Alloc. (£)","Gain Pot. % / £","Trend","Go/No-Go","AI Reasoning"
     ])
     df["Rank"] = range(1, len(df) + 1)
     return df.sort_values("Breakout Score", ascending=False).head(100)
 
-
+# ==============================
+# Chart Plotter
+# ==============================
 def plot_chart(symbol, df):
-    """Plot candlestick with SL/TP lines"""
     try:
-        hist = yf.download(symbol, period="5d", interval="1h", auto_adjust=False)
+        hist = yf.download(symbol, period="5d", interval="1h")
         fig = go.Figure(data=[go.Candlestick(
             x=hist.index,
             open=hist['Open'],
@@ -175,10 +224,6 @@ def plot_chart(symbol, df):
             close=hist['Close'],
             name=symbol
         )])
-        sl = df.loc[df["Symbol"] == symbol, "SL_Price"].values[0]
-        tp = df.loc[df["Symbol"] == symbol, "TP1_Price"].values[0]
-        fig.add_hline(y=sl, line_color="red", annotation_text="SL", annotation_position="bottom right")
-        fig.add_hline(y=tp, line_color="green", annotation_text="TP", annotation_position="top right")
         st.plotly_chart(fig, use_container_width=True)
     except:
         st.warning(f"No chart data for {symbol}")
@@ -188,7 +233,7 @@ def plot_chart(symbol, df):
 # ==============================
 st.set_page_config(layout="wide", page_title="AI Breakout Scanner")
 
-st.sidebar.header("Settings")
+st.sidebar.header("⚙ Settings")
 pot = st.sidebar.number_input("Investment Pot (£)", min_value=10, value=CAPITAL_BASE, step=10)
 
 tabs = st.tabs(["Live Crypto", "Live Stocks", "Chart View"])
@@ -196,7 +241,7 @@ tabs = st.tabs(["Live Crypto", "Live Stocks", "Chart View"])
 # --- Live Crypto
 with tabs[0]:
     st.subheader("Live Crypto Breakouts (Top 100)")
-    crypto = fetch_crypto_data()
+    crypto = fetch_fused_crypto()
     if not crypto.empty:
         crypto_table = calc_breakout_table(crypto, pot)
         display_cols = [
