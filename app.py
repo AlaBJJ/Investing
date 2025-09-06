@@ -216,7 +216,8 @@ def compute_macd(closes: pd.Series, fast=12, slow=26, signal=9) -> Tuple[Optiona
     ema_slow = closes.ewm(span=slow, adjust=False).mean()
     macd = ema_fast - ema_slow
     signal_line = macd.ewm(span=signal, adjust=False).mean()
-    macd_val = float(macd.iloc[-1]); signal_val = float(signal_line.iloc[-1])
+    macd_val = float(macd.iloc[-1])
+    signal_val = float(signal_line.iloc[-1])
     if not np.isfinite(macd_val) or not np.isfinite(signal_val):
         return None, None
     return macd_val, signal_val
@@ -286,28 +287,4 @@ def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
                 neg = sum(any(w in (a.get("title","")+a.get("body","")).lower() for w in NEGATIVE_WORDS) for a in arts)
                 total = pos + neg
                 return (pos - neg) / total if total else 0.0
-            except:
-                return 0.0
-
-        sentiment_adj = fetch_news_sentiment(symbol) * 5.0  # -5 .. +5
-
-        # Fear & Greed adjustment: center 0.5; scale to ±4 points
-        fg_adj = (fg_score - 0.5) * 8.0  # -4 .. +4
-
-        # Trending boost if CoinGecko lists the symbol (small nudge)
-        trending_adj = 2.0 if isinstance(symbol, str) and symbol.upper() in trending else 0.0
-
-        # Technical confirmation (daily history)
-        rsi_adj = 0.0
-        macd_adj = 0.0
-        try:
-            t1 = f"{symbol}-USD" if isinstance(symbol, str) else symbol
-            hist = yf.download(t1, period="3mo", interval="1d", progress=False)
-            if hist is None or hist.empty:
-                hist = yf.download(symbol, period="3mo", interval="1d", progress=False)
-            if hist is not None and not hist.empty:
-                closes = hist["Close"].dropna()
-                rsi_val = compute_rsi(closes, period=14)
-                macd_val, macd_sig = compute_macd(closes)
-                if rsi_val is not None:
-                    if rsi_val < 30:
+           
