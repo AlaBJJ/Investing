@@ -1,47 +1,6 @@
-"""
-AI Breakout Scanner with Enhanced Features
-
-This Streamlit application builds on a basic breakout scanner for crypto‑currencies
-and stocks by adding the following enhancements:
-
-* **Additional Tabs** – A third data tab labelled “eToro Crypto & Stocks”
-  mirrors the crypto and stock tables but is clearly separated in the UI.  In
-  practice this tab uses the same data sources as the existing tabs because
-  free access to eToro’s internal pricing feeds is not available.  It simply
-  repackages the information so that users who operate through eToro can see
-  a dedicated view.
-* **News‑Aware Breakout Model** – A simple sentiment analyser reads recent
-  cryptocurrency news from CryptoCompare’s free news API and assigns a score
-  based on the prevalence of positive versus negative words.  This score is
-  blended into the breakout score calculation so that assets receiving
-  favourable coverage gain a small boost.  The analysis relies on a
-  lightweight word‑list and does **not** guarantee future returns.  It is a
-  heuristic designed to encourage users to remain aware of how news can
-  influence markets.  If the API call fails (for example if no API key is
-  provided) the sentiment contribution defaults to zero.
-* **Tighter Stop‑Loss (SL) and Take‑Profit (TP) Boundaries** –  To help
-  protect capital, the distance between entry price and stop‑loss is reduced
-  and the minimum profit target is increased.  The previous ATR (Average
-  True Range) multipliers have been adjusted, and a minimum percentage is
-  applied so that both risk and reward levels are more controlled.  These
-  parameters can be tuned by editing the constants below.
-* **Conditional Formatting** – Rows where the scanner recommends “Go” are
-  highlighted in green.  This visual cue draws the eye toward potential
-  opportunities and helps distinguish them from entries that should be
-  avoided.  The `pandas.DataFrame.style` API is used to apply CSS classes
-  within the Streamlit table.
-* **Strategy Advice Tab** – A fourth tab summarises widely recognised
-  investment strategies for both crypto and traditional markets.  The
-  guidance is extracted from publicly available educational sources.  It is
-  presented for informational purposes only and should not be considered
-  personalised financial advice.  Users are encouraged to consult a
-  professional advisor and to conduct their own due diligence.
-
-This file is meant to be run with `streamlit run app.py`.  Because no
-streamlit server is started in this environment, executing the file may
-do nothing here.  The code is provided so that it can be saved to disk
-and executed locally by the user.
-"""
+# ==============================
+# AI Breakout Scanner (Crypto + Stocks) — Enhanced & Fixed
+# ==============================
 
 import streamlit as st
 import pandas as pd
@@ -50,26 +9,24 @@ import requests
 from datetime import datetime, timedelta, timezone
 import yfinance as yf
 import plotly.graph_objects as go
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+from pandas.io.formats.style import Styler  # <-- fix: import Styler for type hint
 
 
 # ==============================
-# Configuration
+# Config
 # ==============================
+REFRESH_INTERVAL = 60
+CAPITAL_BASE = 1000
+REVOLUT_FEES = 0.0099 * 2 + 0.005 * 2  # ~2.98% round trip
 
-REFRESH_INTERVAL = 60  # seconds between refreshes – unused but left for clarity
-CAPITAL_BASE = 1000    # default investment pot in GBP
-REVOLUT_FEES = 0.0099 * 2 + 0.005 * 2  # ≈2.98% round trip cost
+# Tighter SL/TP parameters (still same table outputs)
+ATR_SL_MULTIPLIER = 1.0     # tighter than original 1.5
+MIN_SL_RATIO = 0.015        # minimum 1.5% SL
+ATR_TP_MULTIPLIER = 2.5     # TP stays generous
+MIN_TP_RATIO = 0.03         # minimum 3% TP
 
-# Multipliers for SL/TP calculation.  These values tighten the risk window.
-ATR_SL_MULTIPLIER = 1.0   # previously 1.5
-MIN_SL_RATIO = 0.015      # 1.5% of price minimum SL distance
-ATR_TP_MULTIPLIER = 2.5   # previously 2.5; TP still generous relative to SL
-MIN_TP_RATIO = 0.03       # 3% of price minimum TP distance
-
-# Word lists for simple sentiment analysis.  Positive and negative words are
-# deliberately broad; fine‑tuning them may improve the signal.  Feel free to
-# extend these lists to capture more nuance.
+# Sentiment wordlists for simple news analysis (free heuristic)
 POSITIVE_WORDS = {
     "surge", "rise", "rises", "rising", "soar", "soars", "gain", "gains",
     "gaining", "increase", "increases", "increased", "up", "bull", "bullish",
@@ -81,601 +38,364 @@ NEGATIVE_WORDS = {
     "crash", "crashes", "slump", "slumps"
 }
 
-
-# ==============================
-# Additional Market Sentiment Fetchers and Technical Indicators
-# ==============================
-
-def fetch_fear_greed() -> Tuple[float, str]:
-    """Fetch the Crypto Fear & Greed Index.
-
-    This function queries the Alternative.me API for the current fear and
-    greed index value and classification.  The index ranges from 0 to 100,
-    where lower values correspond to "extreme fear" and higher values
-    correspond to "extreme greed"【573275957521421†L85-L96】.  Extreme fear can
-    sometimes present buying opportunities【573275957521421†L130-L146】.  A
-    neutral value of 50 indicates balanced sentiment.  In case of any
-    error (for example network issues), the function returns (50, "Neutral").
-
-    Returns
-    -------
-    Tuple[float, str]
-        The index value and its classification (e.g., "Fear", "Greed").
-    """
-    try:
-        resp = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
-        resp.raise_for_status()
-        payload = resp.json().get("data", [])
-        if not payload:
-            return 50.0, "Neutral"
-        entry = payload[0]
-        # The API returns strings; convert to float for calculations.
-        value = float(entry.get("value", 50.0))
-        classification = entry.get("value_classification", "Neutral")
-        return value, classification
-    except Exception:
-        # On failure, default to neutral sentiment.
-        return 50.0, "Neutral"
-
-
-def fetch_trending_coins() -> set:
-    """Fetch a set of currently trending cryptocurrency symbols.
-
-    The CoinGecko trending endpoint returns a list of coins generating
-    significant interest【287987501053356†L0-L26】.  This function extracts
-    the symbols of the top trending coins and returns them as an uppercase
-    set.  If the API call fails, an empty set is returned.
-
-    Returns
-    -------
-    set
-        A set of trending crypto ticker symbols (uppercase).
-    """
-    try:
-        resp = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=10)
-        resp.raise_for_status()
-        coins = resp.json().get("coins", [])
-        trending = {coin.get("item", {}).get("symbol", "").upper() for coin in coins}
-        return {sym for sym in trending if sym}
-    except Exception:
-        return set()
-
-
-def compute_rsi(series: pd.Series, period: int = 14) -> float:
-    """Compute the Relative Strength Index (RSI) of a price series.
-
-    RSI is a momentum oscillator that measures the speed and magnitude of
-    recent price changes【151788861916106†L366-L379】.  Traditional
-    interpretation considers an RSI above 70 to indicate overbought
-    conditions and below 30 to indicate oversold conditions【151788861916106†L378-L391】.
-    This function returns the most recent RSI value.  If insufficient data
-    exists, a neutral value of 50 is returned.
-
-    Parameters
-    ----------
-    series: pd.Series
-        A series of closing prices indexed by date.
-    period: int
-        The look‑back period for the RSI (default 14).
-
-    Returns
-    -------
-    float
-        The latest RSI value.
-    """
-    # Ensure we have enough data
-    if series is None or len(series) < period + 1:
-        return 50.0
-    # Calculate price changes
-    delta = series.diff().dropna()
-    up = delta.where(delta > 0, 0.0)
-    down = -delta.where(delta < 0, 0.0)
-    # Smooth with rolling mean
-    roll_up = up.rolling(window=period).mean()
-    roll_down = down.rolling(window=period).mean()
-    rs = roll_up / roll_down.replace(0, np.nan)
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    return float(rsi.iloc[-1]) if not rsi.empty and pd.notnull(rsi.iloc[-1]) else 50.0
-
-
-def compute_macd(series: pd.Series, short: int = 12, long: int = 26, signal: int = 9) -> Tuple[float, float]:
-    """Compute the MACD (Moving Average Convergence/Divergence) and its signal line.
-
-    MACD measures momentum by subtracting a longer exponential moving
-    average (EMA) from a shorter EMA【54113305808869†L401-L449】.  A positive
-    MACD value means the short EMA is above the long EMA, indicating upward
-    momentum; a negative value indicates downward momentum.  The signal
-    line is a smoothed (EMA) version of the MACD and is used to identify
-    crossovers for buy or sell signals【54113305808869†L423-L501】.
-
-    Parameters
-    ----------
-    series: pd.Series
-        Series of closing prices.
-    short: int
-        Span for the short EMA (default 12).
-    long: int
-        Span for the long EMA (default 26).
-    signal: int
-        Span for the signal EMA (default 9).
-
-    Returns
-    -------
-    Tuple[float, float]
-        The latest MACD value and the latest signal line value.
-    """
-    if series is None or len(series) < long + signal:
-        return 0.0, 0.0
-    exp1 = series.ewm(span=short, adjust=False).mean()
-    exp2 = series.ewm(span=long, adjust=False).mean()
-    macd_line = exp1 - exp2
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    return (
-        float(macd_line.iloc[-1]) if not macd_line.empty else 0.0,
-        float(signal_line.iloc[-1]) if not signal_line.empty else 0.0,
-    )
+# Columns to display (kept identical across tabs)
+display_cols = [
+    "Rank","Name","Symbol","Breakout Score","⚡ Strike Window","Pred. Breakout (hh:mm)",
+    "Entry Price (USD/GBP)","SL % / £ (Price)","TP1 % / £ (Price)","Trigger %",
+    "Distance to SL / TP (%)","AI Alloc. (£)","Gain Pot. % / £","Trend","Go/No-Go","AI Reasoning"
+]
 
 
 # ==============================
 # Sidebar API Settings
 # ==============================
-
-st.set_page_config(layout="wide", page_title="Enhanced AI Breakout Scanner")
-
+st.set_page_config(layout="wide", page_title="AI Breakout Scanner (Enhanced)")
 st.sidebar.header("API Settings")
 
-# Allow users to select which free crypto APIs to include in the data fusion.  If
-# no API is selected, the scanner will display an empty table.
-apis_selected: List[str] = st.sidebar.multiselect(
+apis_selected = st.sidebar.multiselect(
     "Select APIs to include in fusion:",
     ["CoinMarketCap", "CoinGecko", "CryptoCompare", "Coinpaprika", "CoinCap"],
     default=["CoinMarketCap", "CoinGecko", "CryptoCompare", "Coinpaprika", "CoinCap"]
 )
 
-# API keys (persisted in session state)
 if "CMC_API_KEY" not in st.session_state:
     st.session_state["CMC_API_KEY"] = ""
 if "CC_API_KEY" not in st.session_state:
     st.session_state["CC_API_KEY"] = ""
 
-st.session_state["CMC_API_KEY"] = st.sidebar.text_input(
-    "CoinMarketCap API Key", st.session_state["CMC_API_KEY"], type="password"
-)
-st.session_state["CC_API_KEY"] = st.sidebar.text_input(
-    "CryptoCompare API Key (for prices and news)", st.session_state["CC_API_KEY"], type="password"
-)
+st.session_state["CMC_API_KEY"] = st.sidebar.text_input("CoinMarketCap API Key", st.session_state["CMC_API_KEY"], type="password")
+st.session_state["CC_API_KEY"] = st.sidebar.text_input("CryptoCompare API Key", st.session_state["CC_API_KEY"], type="password")
 
 
 # ==============================
-# API Fetchers
+# API Fetchers (Free tiers)
 # ==============================
-
-def fetch_cmc(limit: int = 100) -> pd.DataFrame:
-    """Fetch cryptocurrency market data from CoinMarketCap.
-
-    Returns a DataFrame with columns: symbol, name, price, change (24h %),
-    volume, and market cap.  If the request fails, an empty DataFrame is
-    returned.
-    """
+def fetch_cmc(limit=100):
     try:
         url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
         headers = {"X-CMC_PRO_API_KEY": st.session_state["CMC_API_KEY"]}
         params = {"start": "1", "limit": str(limit), "convert": "USD"}
         resp = requests.get(url, headers=headers, params=params, timeout=10)
         resp.raise_for_status()
-        data = resp.json().get("data", [])
-        return pd.DataFrame([
-            {
-                "symbol": a.get("symbol"),
-                "name": a.get("name"),
-                "price": a.get("quote", {}).get("USD", {}).get("price"),
-                "change": a.get("quote", {}).get("USD", {}).get("percent_change_24h"),
-                "volume": a.get("quote", {}).get("USD", {}).get("volume_24h"),
-                "mcap": a.get("quote", {}).get("USD", {}).get("market_cap"),
-            }
-            for a in data
-        ])
-    except Exception:
+        data = resp.json()["data"]
+        return pd.DataFrame([{
+            "symbol": a["symbol"],
+            "name": a["name"],
+            "price": a["quote"]["USD"]["price"],
+            "change": a["quote"]["USD"]["percent_change_24h"],
+            "volume": a["quote"]["USD"]["volume_24h"],
+            "mcap": a["quote"]["USD"]["market_cap"]
+        } for a in data])
+    except:
         return pd.DataFrame()
 
-
-def fetch_coingecko(limit: int = 100) -> pd.DataFrame:
-    """Fetch cryptocurrency market data from CoinGecko."""
+def fetch_coingecko(limit=100):
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": limit, "page": 1}
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        return pd.DataFrame([
-            {
-                "symbol": a.get("symbol", "").upper(),
-                "name": a.get("name"),
-                "price": a.get("current_price"),
-                "change": a.get("price_change_percentage_24h"),
-                "volume": a.get("total_volume"),
-                "mcap": a.get("market_cap"),
-            }
-            for a in data
-        ])
-    except Exception:
+        return pd.DataFrame([{
+            "symbol": a["symbol"].upper(),
+            "name": a["name"],
+            "price": a["current_price"],
+            "change": a["price_change_percentage_24h"],
+            "volume": a["total_volume"],
+            "mcap": a["market_cap"]
+        } for a in data])
+    except:
         return pd.DataFrame()
 
-
-def fetch_cryptocompare(limit: int = 100) -> pd.DataFrame:
-    """Fetch cryptocurrency market data from CryptoCompare."""
+def fetch_cryptocompare(limit=100):
     try:
         url = "https://min-api.cryptocompare.com/data/top/mktcapfull"
         params = {"limit": limit, "tsym": "USD", "api_key": st.session_state["CC_API_KEY"]}
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
-        data = resp.json().get("Data", [])
-        return pd.DataFrame([
-            {
-                "symbol": a.get("CoinInfo", {}).get("Name"),
-                "name": a.get("CoinInfo", {}).get("FullName"),
-                "price": a.get("RAW", {}).get("USD", {}).get("PRICE"),
-                "change": a.get("RAW", {}).get("USD", {}).get("CHANGEPCT24HOUR"),
-                "volume": a.get("RAW", {}).get("USD", {}).get("VOLUME24HOUR"),
-                "mcap": a.get("RAW", {}).get("USD", {}).get("MKTCAP"),
-            }
-            for a in data
-        ])
-    except Exception:
+        data = resp.json()["Data"]
+        return pd.DataFrame([{
+            "symbol": a["CoinInfo"]["Name"],
+            "name": a["CoinInfo"]["FullName"],
+            "price": a["RAW"]["USD"]["PRICE"],
+            "change": a["RAW"]["USD"]["CHANGEPCT24HOUR"],
+            "volume": a["RAW"]["USD"]["VOLUME24HOUR"],
+            "mcap": a["RAW"]["USD"]["MKTCAP"]
+        } for a in data])
+    except:
         return pd.DataFrame()
 
-
-def fetch_coinpaprika(limit: int = 100) -> pd.DataFrame:
-    """Fetch cryptocurrency market data from Coinpaprika."""
+def fetch_coinpaprika(limit=100):
     try:
         url = "https://api.coinpaprika.com/v1/tickers"
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
         data = resp.json()[:limit]
-        return pd.DataFrame([
-            {
-                "symbol": a.get("symbol"),
-                "name": a.get("name"),
-                "price": a.get("quotes", {}).get("USD", {}).get("price"),
-                "change": a.get("quotes", {}).get("USD", {}).get("percent_change_24h"),
-                "volume": a.get("quotes", {}).get("USD", {}).get("volume_24h"),
-                "mcap": a.get("quotes", {}).get("USD", {}).get("market_cap"),
-            }
-            for a in data
-        ])
-    except Exception:
+        return pd.DataFrame([{
+            "symbol": a["symbol"],
+            "name": a["name"],
+            "price": a["quotes"]["USD"]["price"],
+            "change": a["quotes"]["USD"]["percent_change_24h"],
+            "volume": a["quotes"]["USD"]["volume_24h"],
+            "mcap": a["quotes"]["USD"]["market_cap"]
+        } for a in data])
+    except:
         return pd.DataFrame()
 
-
-def fetch_coincap(limit: int = 100) -> pd.DataFrame:
-    """Fetch cryptocurrency market data from CoinCap."""
+def fetch_coincap(limit=100):
     try:
         url = "https://api.coincap.io/v2/assets"
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
-        data = resp.json().get("data", [])[:limit]
-        return pd.DataFrame([
-            {
-                "symbol": a.get("symbol"),
-                "name": a.get("name"),
-                "price": float(a.get("priceUsd", 0)),
-                "change": float(a.get("changePercent24Hr", 0)),
-                "volume": float(a.get("volumeUsd24Hr", 0) or 0),
-                "mcap": float(a.get("marketCapUsd", 0) or 0),
-            }
-            for a in data
-        ])
-    except Exception:
+        data = resp.json()["data"][:limit]
+        return pd.DataFrame([{
+            "symbol": a["symbol"],
+            "name": a["name"],
+            "price": float(a["priceUsd"]),
+            "change": float(a["changePercent24Hr"]),
+            "volume": float(a["volumeUsd24Hr"]) if a["volumeUsd24Hr"] else 0,
+            "mcap": float(a["marketCapUsd"]) if a["marketCapUsd"] else 0
+        } for a in data])
+    except:
         return pd.DataFrame()
 
 
 # ==============================
-# News Sentiment Fetcher
+# Extra Free Signals/Indicators
 # ==============================
-
-def fetch_news_sentiment(symbol: str, max_articles: int = 20) -> float:
-    """Compute a simple sentiment score for a cryptocurrency symbol.
-
-    This function queries CryptoCompare’s news API for recent articles and
-    attempts to extract a sentiment value by counting occurrences of positive
-    and negative words in titles and body text.  The score is normalised to
-    the range [-1, 1].  A positive score indicates a higher prevalence of
-    upbeat terms, whereas a negative score suggests more bearish wording.
-
-    Parameters
-    ----------
-    symbol: str
-        The crypto ticker (e.g. "BTC").  Passed to the API via the
-        `categories` parameter, although some ambiguity exists in how
-        CryptoCompare defines categories.  If no articles are returned or
-        sentiment cannot be determined, the function returns 0.
-
-    max_articles: int
-        Maximum number of articles to consider.  Larger values increase
-        processing time without necessarily improving accuracy.
+def fetch_fear_greed() -> Tuple[float, str]:
     """
-    api_key = st.session_state.get("CC_API_KEY", "")
-    # If no API key is provided, return neutral sentiment.
-    if not api_key:
-        return 0.0
-
+    Fetch Crypto Fear & Greed Index (Alternative.me free JSON).
+    Returns (normalized_score_0_to_1, label). Fails gracefully to (0.5, "Neutral").
+    """
     try:
-        # Request news articles.  We pass the symbol as a category to narrow
-        # results.  CryptoCompare’s categories are not strictly ticker
-        # symbols, but the API will still return relevant articles.  If the
-        # call fails, an exception is raised and 0.0 is returned.
-        url = "https://min-api.cryptocompare.com/data/v2/news/"
-        params = {
-            "lang": "EN",
-            "categories": symbol,
-            "api_key": api_key,
-        }
-        resp = requests.get(url, params=params, timeout=10)
+        resp = requests.get("https://api.alternative.me/fng/", timeout=10)
         resp.raise_for_status()
-        articles = resp.json().get("Data", [])[:max_articles]
-        if not articles:
-            return 0.0
+        payload = resp.json()
+        data = (payload.get("data") or payload.get("Data") or [])
+        if not data:
+            return 0.5, "Neutral"
+        value = float(data[0].get("value", 50))
+        classification = data[0].get("value_classification", "Neutral")
+        return value / 100.0, classification
+    except:
+        return 0.5, "Neutral"
 
-        pos_count = 0
-        neg_count = 0
-        for art in articles:
-            text = (art.get("title", "") + " " + art.get("body", "")).lower()
-            for word in POSITIVE_WORDS:
-                if word in text:
-                    pos_count += 1
-            for word in NEGATIVE_WORDS:
-                if word in text:
-                    neg_count += 1
+def fetch_trending_coins() -> set:
+    """
+    CoinGecko trending endpoint (no key). Returns a set of upper-case symbols.
+    """
+    try:
+        resp = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=10)
+        resp.raise_for_status()
+        data = resp.json().get("coins", [])
+        out = set()
+        for c in data:
+            sym = c.get("item", {}).get("symbol")
+            if sym:
+                out.add(sym.upper())
+        return out
+    except:
+        return set()
 
-        total = pos_count + neg_count
-        if total == 0:
-            return 0.0
-        return (pos_count - neg_count) / float(total)
-    except Exception:
-        return 0.0
+def compute_rsi(closes: pd.Series, period: int = 14) -> Optional[float]:
+    if closes is None or len(closes) < period + 1:
+        return None
+    delta = closes.diff()
+    up = delta.clip(lower=0.0)
+    down = -delta.clip(upper=0.0)
+    roll_up = up.ewm(alpha=1/period, adjust=False).mean()
+    roll_down = down.ewm(alpha=1/period, adjust=False).mean()
+    rs = roll_up / (roll_down.replace(0, np.nan))
+    rsi = 100 - (100 / (1 + rs))
+    val = float(rsi.iloc[-1])
+    return val if np.isfinite(val) else None
+
+def compute_macd(closes: pd.Series, fast=12, slow=26, signal=9) -> Tuple[Optional[float], Optional[float]]:
+    if closes is None or len(closes) < slow + signal + 5:
+        return None, None
+    ema_fast = closes.ewm(span=fast, adjust=False).mean()
+    ema_slow = closes.ewm(span=slow, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    macd_val = float(macd.iloc[-1])
+    signal_val = float(signal_line.iloc[-1])
+    if not np.isfinite(macd_val) or not np.isfinite(signal_val):
+        return None, None
+    return macd_val, signal_val
 
 
 # ==============================
 # Data Fusion
 # ==============================
+def fuse_data(limit=100):
+    sources = []
+    if "CoinMarketCap" in apis_selected: sources.append(fetch_cmc(limit))
+    if "CoinGecko" in apis_selected: sources.append(fetch_coingecko(limit))
+    if "CryptoCompare" in apis_selected: sources.append(fetch_cryptocompare(limit))
+    if "Coinpaprika" in apis_selected: sources.append(fetch_coinpaprika(limit))
+    if "CoinCap" in apis_selected: sources.append(fetch_coincap(limit))
 
-def fuse_data(limit: int = 100) -> pd.DataFrame:
-    """Combine data from the selected sources into a single DataFrame."""
-    sources: List[pd.DataFrame] = []
-    if "CoinMarketCap" in apis_selected:
-        sources.append(fetch_cmc(limit))
-    if "CoinGecko" in apis_selected:
-        sources.append(fetch_coingecko(limit))
-    if "CryptoCompare" in apis_selected:
-        sources.append(fetch_cryptocompare(limit))
-    if "Coinpaprika" in apis_selected:
-        sources.append(fetch_coinpaprika(limit))
-    if "CoinCap" in apis_selected:
-        sources.append(fetch_coincap(limit))
-
-    if not sources:
-        return pd.DataFrame()
-
+    if not sources: return pd.DataFrame()
     df = pd.concat(sources).groupby("symbol").agg({
         "name": "first",
         "price": "median",
         "change": "mean",
         "volume": "mean",
-        "mcap": "mean",
+        "mcap": "mean"
     }).reset_index()
     return df
 
 
 # ==============================
-# Breakout Model
+# Breakout Model (Refined; same table schema)
 # ==============================
-
-def calc_breakout_table(data: pd.DataFrame, investment_pot: float = CAPITAL_BASE) -> pd.DataFrame:
-    """Calculate the breakout table.
-
-    Each row in the returned DataFrame represents a single crypto or stock.  A
-    number of derived columns are added:
-
-    * **Breakout Score** – weighted combination of volatility, liquidity,
-      market cap and trend, adjusted by simple news sentiment.
-    * **SL/TP** – stop‑loss and take‑profit levels are derived from the
-      underlying price and its recent change (ATR approximation).  The
-      multipliers defined in the constants above ensure tighter risk
-      management.
-    * **AI Alloc. (£)** – position sizing based on a Kelly fraction using the
-      calculated risk/reward.  This remains a guide rather than a rule.
-    * **Go/No-Go** – recommendation flag; “Go” appears only when the asset’s
-      breakout score is at least 85, the price is trending up, and the
-      risk/reward is favourable (RR > 1.5).
-    * **AI Reasoning** – concise explanation of how the score was derived.
-
-    Parameters
-    ----------
-    data: pd.DataFrame
-        DataFrame containing at least the columns: name, symbol, price,
-        change (24h), volume, and mcap.
-
-    investment_pot: float
-        The total capital available for allocation.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with calculated metrics for each asset.
-    """
-    rows: List[List] = []
+def calc_breakout_table(data, investment_pot=CAPITAL_BASE):
+    rows = []
     now = datetime.now(timezone.utc)
-    total_mcap = data["mcap"].sum() if "mcap" in data and data["mcap"].sum() else 1.0
+    total_mcap = data["mcap"].sum() if "mcap" in data and data["mcap"].sum() else 1
 
-    # Fetch external context once per table calculation
-    fg_value, fg_class = fetch_fear_greed()
-    # Normalise the fear/greed index: values below 50 (fear) increase the score,
-    # values above 50 (greed) decrease it.  Multiply by 5 for moderate impact.
-    fg_adjustment = ((50.0 - fg_value) / 50.0) * 5.0
-    trending_coins = fetch_trending_coins()
+    # One-time context fetches (free)
+    fg_score, fg_label = fetch_fear_greed()     # 0..1
+    trending = fetch_trending_coins()           # set of symbols
 
     for _, row in data.iterrows():
-        name = row.get("name")
-        symbol = row.get("symbol")
-        price = row.get("price")
-        change = row.get("change")
-        volume = row.get("volume")
-        mcap = row.get("mcap")
+        name, symbol = row.get("name"), row.get("symbol")
+        price = row.get("price") or 0.0
+        change = row.get("change") or 0.0
+        volume = row.get("volume") or 0.0
+        mcap = row.get("mcap") or 0.0
 
-        # Protect against missing or zero values
-        price = price if pd.notnull(price) else 0.0
-        change = change if pd.notnull(change) else 0.0
-        volume = volume if pd.notnull(volume) else 0.0
-        mcap = mcap if pd.notnull(mcap) else 0.0
+        # Base factors
+        vol_factor = min(abs(change) / 10, 1.0)
+        vol_score = vol_factor * 100
+        liq_score = (np.log1p(volume) / 25) * 100
+        trend_score = (np.tanh(change / 5) + 1) * 50
 
-        # Core factors derived from price and volume
-        vol_factor = min(abs(change) / 10.0, 1.0)
-        vol_score = vol_factor * 100.0
-        liq_score = (np.log1p(volume) / 25.0) * 100.0
-        trend_score = (np.tanh(change / 5.0) + 1.0) * 50.0
-        # Combine baseline scores; emphasise volatility, liquidity, and trend
-        base_score = (
-            0.4 * vol_score +
-            0.3 * liq_score +
-            0.2 * trend_score +
-            0.1 * (100.0 - abs(vol_score - liq_score))
-        )
-        base_score = float(np.clip(base_score, 50.0, 100.0))
+        base_score = (0.4 * vol_score + 0.3 * liq_score + 0.2 * trend_score + 0.1 * (100 - abs(vol_score - liq_score)))
+        base_score = float(np.clip(base_score, 50, 100))
 
-        # News sentiment adjustment (CryptoCompare)
-        sentiment = fetch_news_sentiment(symbol)
-        sentiment_adjustment = sentiment * 5.0
+        # Free news sentiment (CryptoCompare; neutral if no key or failure)
+        def fetch_news_sentiment(sym: str, max_articles: int = 20) -> float:
+            api_key = st.session_state.get("CC_API_KEY", "")
+            if not api_key:
+                return 0.0
+            try:
+                url = "https://min-api.cryptocompare.com/data/v2/news/"
+                params = {"lang": "EN", "categories": sym, "api_key": api_key}
+                resp = requests.get(url, params=params, timeout=10)
+                resp.raise_for_status()
+                arts = resp.json().get("Data", [])[:max_articles]
+                if not arts:
+                    return 0.0
+                pos = sum(any(w in (a.get("title","")+a.get("body","")).lower() for w in POSITIVE_WORDS) for a in arts)
+                neg = sum(any(w in (a.get("title","")+a.get("body","")).lower() for w in NEGATIVE_WORDS) for a in arts)
+                total = pos + neg
+                return (pos - neg) / total if total else 0.0
+            except:
+                return 0.0
 
-        # Trending coins adjustment: if the symbol is trending, add a small boost
-        trending_adjustment = 3.0 if symbol.upper() in trending_coins else 0.0
+        sentiment_adj = fetch_news_sentiment(symbol) * 5.0  # -5 .. +5
 
-        # Technical indicators via price history
+        # Fear & Greed adjustment: center 0.5; scale to ±4 points
+        fg_adj = (fg_score - 0.5) * 8.0  # -4 .. +4
+
+        # Trending boost if CoinGecko lists the symbol (small nudge)
+        trending_adj = 2.0 if isinstance(symbol, str) and symbol.upper() in trending else 0.0
+
+        # Technical confirmation (daily history)
+        rsi_adj = 0.0
+        macd_adj = 0.0
         try:
-            # Attempt to download recent daily data (30 days) for RSI and MACD
-            if symbol is not None and isinstance(symbol, str):
-                # Attempt to fetch USD‑denominated data first (common for crypto).  If
-                # that fails or returns an empty DataFrame, try the raw symbol as a
-                # stock ticker.  This heuristic avoids incorrectly appending "-USD"
-                # to stock tickers like AAPL.
-                ticker_candidates: List[str] = [f"{symbol}-USD", symbol]
-                price_series = pd.Series(dtype=float)
-                for ticker in ticker_candidates:
-                    try:
-                        hist = yf.download(ticker, period="30d", interval="1d", progress=False)
-                        if not hist.empty:
-                            price_series = hist["Close"]
-                            break
-                    except Exception:
-                        continue
-            else:
-                price_series = pd.Series(dtype=float)
-        except Exception:
-            price_series = pd.Series(dtype=float)
+            # Try crypto ticker first: SYMBOL-USD; if empty, fall back to SYMBOL (stocks)
+            t1 = f"{symbol}-USD" if isinstance(symbol, str) else symbol
+            hist = yf.download(t1, period="3mo", interval="1d", progress=False)
+            if hist is None or hist.empty:
+                hist = yf.download(symbol, period="3mo", interval="1d", progress=False)
 
-        rsi_value = compute_rsi(price_series)
-        # RSI adjustment: oversold (<30) gives +5, overbought (>70) gives -5
-        if rsi_value < 30.0:
-            rsi_adjustment = 5.0
-        elif rsi_value > 70.0:
-            rsi_adjustment = -5.0
-        else:
-            rsi_adjustment = 0.0
+            if hist is not None and not hist.empty:
+                closes = hist["Close"].dropna()
+                rsi_val = compute_rsi(closes, period=14)
+                macd_val, macd_sig = compute_macd(closes)
 
-        macd_val, macd_sig = compute_macd(price_series)
-        # MACD adjustment: bullish crossover if MACD > signal yields +2, bearish yields -2
-        macd_adjustment = 2.0 if macd_val > macd_sig else -2.0
+                # RSI: reward oversold (<30), mild penalty for >70
+                if rsi_val is not None:
+                    if rsi_val < 30:
+                        rsi_adj = 3.0
+                    elif rsi_val > 70:
+                        rsi_adj = -2.0
 
-        # Compose final score
-        raw_score = base_score + sentiment_adjustment + fg_adjustment + trending_adjustment + rsi_adjustment + macd_adjustment
-        score = float(np.clip(raw_score, 50.0, 100.0))
+                # MACD: if above signal, add; below, subtract
+                if macd_val is not None and macd_sig is not None:
+                    if macd_val > macd_sig:
+                        macd_adj = 2.0
+                    elif macd_val < macd_sig:
+                        macd_adj = -2.0
+        except:
+            pass
 
-        # Approximate ATR from price change; the division by 2 smooths the range
-        atr = price * abs(change) / 100.0 / 2.0
+        score = float(np.clip(base_score + sentiment_adj + fg_adj + trending_adj + rsi_adj + macd_adj, 50, 100))
 
-        # Calculate stop‑loss and take‑profit boundaries using tight multipliers
+        # Risk levels (same columns; tightened bounds)
+        atr = price * abs(change) / 100 / 2
         sl_price = price - max(ATR_SL_MULTIPLIER * atr, MIN_SL_RATIO * price)
         tp1_price = price + max(ATR_TP_MULTIPLIER * atr, MIN_TP_RATIO * price)
+        sl_pct = (sl_price - price) / price * 100 if price else 0.0
+        tp1_pct = (tp1_price - price) / price * 100 - REVOLUT_FEES * 100 if price else 0.0
+        rr = abs(tp1_pct / sl_pct) if sl_pct != 0 else 0.0
 
-        sl_pct = ((sl_price - price) / price) * 100.0 if price != 0.0 else 0.0
-        tp1_pct = ((tp1_price - price) / price) * 100.0 - REVOLUT_FEES * 100.0 if price != 0.0 else 0.0
-        rr = abs(tp1_pct / sl_pct) if sl_pct != 0.0 else 0.0
-
-        p = score / 100.0
+        # Kelly sizing (advisory)
+        p = score / 100
         b = rr
-        kelly = max(((p * (b + 1.0) - 1.0) / b) if b > 0.0 else 0.0, 0.0)
+        kelly = max((p * (b + 1) - 1) / b, 0) if b > 0 else 0
         alloc = round(min(investment_pot * kelly, investment_pot), 2)
-        gain_pot = round(alloc * tp1_pct / 100.0, 2)
+        gain_pot = round(alloc * tp1_pct / 100, 2)
 
-        strike = "Yes" if score >= 85.0 else "No"
-        breakout_time = (now + timedelta(minutes=int(np.random.randint(30, 180)))).strftime("%H:%M")
-        trend = "↑" if change > 0.0 else ("↓" if change < 0.0 else "↔")
-        go = "Go" if score >= 85.0 and trend == "↑" and rr > 1.5 else "No-Go"
+        strike = "Yes" if score >= 85 else "No"
+        breakout_time = (now + timedelta(minutes=np.random.randint(30, 180))).strftime("%H:%M")
+        trend = "↑" if change > 0 else ("↓" if change < 0 else "↔")
+        go = "Go" if score >= 85 and trend == "↑" and rr > 1.5 else "No-Go"
 
-        # Build reasoning string summarising the factors
-        reasoning_parts = [
-            f"Base {base_score:.1f}",
-            f"News adj {sentiment_adjustment:+.1f}",
-            f"Fear&Greed adj {fg_adjustment:+.1f}",
-            f"Trend adj {trending_adjustment:+.1f}",
-            f"RSI {rsi_value:.1f} adj {rsi_adjustment:+.1f}",
-            f"MACD adj {macd_adjustment:+.1f}",
-            f"Vol {change:.2f}%", f"Vol24h ${volume/1e6:.1f}M", f"MCAP ${mcap/1e9:.1f}B", f"R/R {rr:.2f}", f"Kelly £{alloc}"
-        ]
-        reasoning = ", ".join(reasoning_parts)
+        reasoning = (
+            f"Score {score:.1f}, Vol {change:.2f}%, Vol24h ${volume/1e6:.1f}M, "
+            f"MCAP ${mcap/1e9:.1f}B, R/R {rr:.2f}, Kelly £{alloc}; "
+            f"FG {int(fg_score*100)}({fg_label}) {'+2' if trending_adj else ''} "
+            f"{'RSI<30 +3' if rsi_adj==3.0 else ('RSI>70 -2' if rsi_adj==-2.0 else '')} "
+            f"{'MACD+2' if macd_adj==2.0 else ('MACD-2' if macd_adj==-2.0 else '')}"
+        ).strip()
 
         rows.append([
-            None,
-            name,
-            symbol,
-            round(score, 2),
-            strike,
-            breakout_time,
-            round(price, 4),
-            f"{sl_pct:.2f}% (£{alloc * sl_pct/100.0:.2f}) ({sl_price:.2f})",
+            None, name, symbol, round(score, 2), strike, breakout_time,
+            round(price, 4), f"{sl_pct:.2f}% (£{alloc * sl_pct/100:.2f}) ({sl_price:.2f})",
             f"{tp1_pct:.2f}% (£{gain_pot:.2f}) ({tp1_price:.2f})",
-            "0.00%",
-            f"{sl_pct:.2f}% / {tp1_pct:.2f}%",
-            f"£{alloc}",
-            f"{tp1_pct:.2f}% / £{gain_pot}",
-            trend,
-            go,
-            reasoning,
-            sl_price,
-            tp1_price,
+            "0.00%", f"{sl_pct:.2f}% / {tp1_pct:.2f}%", f"£{alloc}",
+            f"{tp1_pct:.2f}% / £{gain_pot}", trend, go, reasoning, sl_price, tp1_price
         ])
 
     df = pd.DataFrame(rows, columns=[
-        "Rank",
-        "Name",
-        "Symbol",
-        "Breakout Score",
-        "⚡ Strike Window",
-        "Pred. Breakout (hh:mm)",
-        "Entry Price (USD/GBP)",
-        "SL % / £ (Price)",
-        "TP1 % / £ (Price)",
-        "Trigger %",
-        "Distance to SL / TP (%)",
-        "AI Alloc. (£)",
-        "Gain Pot. % / £",
-        "Trend",
-        "Go/No-Go",
-        "AI Reasoning",
-        "SL_Price",
-        "TP1_Price",
+        "Rank","Name","Symbol","Breakout Score","⚡ Strike Window","Pred. Breakout (hh:mm)",
+        "Entry Price (USD/GBP)","SL % / £ (Price)","TP1 % / £ (Price)","Trigger %",
+        "Distance to SL / TP (%)","AI Alloc. (£)","Gain Pot. % / £","Trend","Go/No-Go",
+        "AI Reasoning","SL_Price","TP1_Price"
     ])
     df["Rank"] = range(1, len(df) + 1)
     return df.sort_values("Breakout Score", ascending=False).head(100)
 
 
 # ==============================
-# Chart Plotting
+# Chart Plotting (with guards)
 # ==============================
-
-def plot_chart(symbol: str, df: pd.DataFrame) -> None:
-    """Plot a candlestick chart with entry/SL/TP lines for a given symbol."""
+def plot_chart(symbol, df):
     try:
-        hist = yf.download(f"{symbol}-USD", period="5d", interval="1h", progress=False)
+        # Try crypto ticker first, then fallback to raw symbol (stocks)
+        t1 = f"{symbol}-USD"
+        hist = yf.download(t1, period="5d", interval="1h", progress=False)
+        if hist is None or hist.empty:
+            hist = yf.download(symbol, period="5d", interval="1h", progress=False)
+        if hist is None or hist.empty:
+            st.warning(f"No chart data for {symbol}")
+            return
+
         fig = go.Figure(data=[go.Candlestick(
             x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close']
         )])
@@ -686,172 +406,78 @@ def plot_chart(symbol: str, df: pd.DataFrame) -> None:
         fig.add_hline(y=sl, line_color="red", annotation_text="SL", annotation_position="bottom right")
         fig.add_hline(y=tp, line_color="green", annotation_text="TP", annotation_position="top right")
         st.plotly_chart(fig, use_container_width=True)
-    except Exception:
+    except:
         st.warning(f"No chart data for {symbol}")
 
 
 # ==============================
-# Helper for conditional styling
+# Conditional Formatting (fix: safe type hint)
 # ==============================
-
-def style_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
-    """Apply conditional formatting to highlight Go recommendations in green."""
+def style_table(df: pd.DataFrame) -> Styler:
     def highlight_go(row: pd.Series) -> List[str]:
-        return [
-            "background-color: #e6ffe6" if row.get("Go/No-Go") == "Go" else ""
-            for _ in row
-        ]
-
+        return ["background-color: #e6ffe6" if row.get("Go/No-Go") == "Go" else "" for _ in row]
     return df.style.apply(highlight_go, axis=1)
 
 
 # ==============================
-# Layout and Interaction
+# Layout
 # ==============================
-
 st.sidebar.header("Settings")
-pot = st.sidebar.number_input(
-    "Investment Pot (£)", min_value=10, value=CAPITAL_BASE, step=10
-)
+pot = st.sidebar.number_input("Investment Pot (£)", min_value=10, value=CAPITAL_BASE, step=10)
 
-tabs = st.tabs(["Live Crypto", "Live Stocks", "eToro Crypto & Stocks", "Chart View", "Investment Strategy"])
+tabs = st.tabs(["Live Crypto", "Live Stocks", "eToro Crypto & Stocks", "Chart View"])
 
-
-# --- Live Crypto Tab
+# --- Crypto
 with tabs[0]:
     st.subheader("Live Crypto Breakouts (Top 100)")
     crypto_data = fuse_data(100)
     if not crypto_data.empty:
         crypto_table = calc_breakout_table(crypto_data, pot)
-        display_cols = [
-            "Rank", "Name", "Symbol", "Breakout Score", "⚡ Strike Window", "Pred. Breakout (hh:mm)",
-            "Entry Price (USD/GBP)", "SL % / £ (Price)", "TP1 % / £ (Price)", "Trigger %", "Distance to SL / TP (%)",
-            "AI Alloc. (£)", "Gain Pot. % / £", "Trend", "Go/No-Go", "AI Reasoning"
-        ]
         st.dataframe(style_table(crypto_table[display_cols]), use_container_width=True)
         choice = st.selectbox("Select crypto for chart", crypto_table["Symbol"])
-        if choice:
-            plot_chart(choice, crypto_table)
+        if choice: plot_chart(choice, crypto_table)
     else:
-        st.warning("No cryptocurrency data available.  Please check your API selections and keys.")
+        st.warning("No cryptocurrency data available. Check your API selections/keys.")
 
-
-# --- Live Stocks Tab
+# --- Stocks
 with tabs[1]:
-    st.subheader("Live Stock Breakouts (S&P100 subset)")
-    # A minimal subset of S&P 100 to avoid heavy API calls
-    sp100 = ["AAPL", "MSFT", "AMZN", "TSLA", "GOOGL", "NVDA", "META", "JPM", "V", "PG"]
+    st.subheader("Live Stock Breakouts (S&P100)")
+    sp100 = ["AAPL","MSFT","AMZN","TSLA","GOOGL","NVDA","META","JPM","V","PG"]
     tickers = yf.download(sp100, period="1d", interval="1h", progress=False, threads=True)
-    latest = tickers["Close"].iloc[-1]
-    stocks = pd.DataFrame([
-        {
+    if tickers is None or ("Close" not in tickers):
+        st.warning("No stock data available from Yahoo Finance.")
+        stock_table = pd.DataFrame(columns=[c for c in display_cols] + ["SL_Price","TP1_Price"])
+    else:
+        latest = tickers["Close"].iloc[-1]
+        stocks = pd.DataFrame([{
             "symbol": s,
             "name": s,
-            "price": latest[s],
+            "price": float(latest.get(s, np.nan)),
             "change": 0.0,
-            "volume": 1,
-            "mcap": 1,
-        }
-        for s in sp100
-    ])
-    stock_table = calc_breakout_table(stocks, pot)
-    st.dataframe(style_table(stock_table[display_cols]), use_container_width=True)
-    choice = st.selectbox("Select stock for chart", stock_table["Symbol"])
-    if choice:
-        plot_chart(choice, stock_table)
+            "volume": 1.0,
+            "mcap": 1.0
+        } for s in sp100])
+        stock_table = calc_breakout_table(stocks, pot)
 
+    if not stock_table.empty:
+        st.dataframe(style_table(stock_table[display_cols]), use_container_width=True)
+        choice = st.selectbox("Select stock for chart", stock_table["Symbol"])
+        if choice: plot_chart(choice, stock_table)
 
-# --- eToro Crypto & Stocks Tab
+# --- eToro (same tables, no proprietary data)
 with tabs[2]:
     st.subheader("eToro Crypto & Stocks")
-    # The eToro tab simply displays the same breakout tables as the previous two tabs
-    # but grouped together for convenience.  This does not use any proprietary
-    # eToro data.  If eToro publishes a public API in the future, those calls
-    # could be incorporated here.
     st.markdown("### Crypto (Top 100)")
-    if not crypto_data.empty:
+    if 'crypto_table' in locals() and not crypto_table.empty:
         st.dataframe(style_table(crypto_table[display_cols]), use_container_width=True)
     else:
         st.warning("No crypto data available.")
-    st.markdown("### Stocks (S&P100 subset)")
-    st.dataframe(style_table(stock_table[display_cols]), use_container_width=True)
+    st.markdown("### Stocks (S&P100)")
+    if 'stock_table' in locals() and not stock_table.empty:
+        st.dataframe(style_table(stock_table[display_cols]), use_container_width=True)
+    else:
+        st.warning("No stock data available.")
 
-
-# --- Chart View Tab
+# --- Charts info
 with tabs[3]:
-    st.subheader("Chart View")
-    st.info("Use the dropdowns in the previous tabs to view candlestick charts with AI Entry/SL/TP overlays.")
-
-
-# --- Investment Strategy Advice Tab
-with tabs[4]:
-    st.subheader("General Investment Strategies (Informational)")
-    st.markdown(
-        """
-        **Disclaimer:** The following content is for general educational purposes
-        only and does **not** constitute personalised financial advice.  Markets
-        are unpredictable, and past performance does not guarantee future
-        results.  Before making any investment decisions, consult a
-        professional advisor and conduct your own research.
-        
-        ### Long‑Term Strategies
-        
-        * **Adopt a Long‑Term Perspective:** Successful investors often avoid
-          the “get in, get out” mindset.  Holding diversified assets for years
-          allows compounding to work in your favour【314281712396511†L330-L360】.
-        * **Dollar‑Cost Averaging (DCA):** Allocate a fixed amount at regular
-          intervals (e.g. monthly).  This reduces the temptation to time the
-          market and can lower your average cost basis over time【203601552392146†L700-L731】.
-        * **Diversify:** Spread your holdings across different asset classes and
-          sectors to reduce exposure to any single failure【543222091951736†L239-L246】.
-        * **Focus on Fundamentals:** Look beyond simple metrics like the P/E
-          ratio.  Evaluate a company’s growth prospects, competitive position
-          and financial health【314281712396511†L396-L405】.
-        * **Let Winners Ride, Cut Losers:** Avoid selling successful positions
-          too early.  At the same time, do not cling to underperforming
-          investments out of hope alone【314281712396511†L454-L477】.
-        
-        ### Short‑Term & Active Strategies
-        
-        * **Momentum Trading:** Traders attempt to capitalise on strong
-          directional moves.  This approach requires careful technical
-          analysis and constant monitoring【203601552392146†L690-L698】.
-        * **Swing Trading:** Positions are held for days or weeks to capture
-          medium‑term price swings.  Risk management and technical indicators
-          (support/resistance levels, moving averages) are critical.
-        * **Value vs. Growth:** Value investors seek undervalued companies with
-          strong fundamentals and patient time horizons【203601552392146†L477-L548】,
-          whereas growth investors focus on firms with rapidly expanding
-          earnings but higher volatility【203601552392146†L550-L624】.
-        * **Buy the Dip:** Acquiring assets during market pullbacks can be
-          rewarding, but timing the exact bottom is difficult.  Setting clear
-          entry levels and not overextending your budget are essential【543222091951736†L318-L327】.
-        
-        ### Crypto‑Specific Considerations
-        
-        * **Long‑Term Holding (HODLing):** Many crypto investors simply hold
-          well‑established coins like Bitcoin and Ethereum through cycles of
-          volatility, believing in their long‑term adoption【543222091951736†L270-L296】.
-        * **Diversify Within Crypto:** Do not allocate your entire crypto
-          budget to a single token.  Consider spreading across large‑cap
-          (BTC, ETH), mid‑cap (SOL, LINK), and emerging themes (AI tokens)【543222091951736†L237-L264】.
-        * **Stay Informed:** Regulations such as the EU’s MiCA and the U.S.
-          SEC’s evolving stance can greatly influence the market【543222091951736†L340-L349】.  Monitor
-          reputable news outlets and cross‑reference major announcements.
-        * **Control Your Emotions:** Crypto markets are notoriously volatile.
-          Avoid impulsive trades driven by fear of missing out or panic
-          selling【543222091951736†L351-L361】.
-        * **Begin with Small Allocations:** Crypto is high risk.  Many
-          educational sources recommend investing only a small percentage of
-          your portfolio (often 1–5%) in digital assets【543222091951736†L407-L414】.
-        
-        ### Final Thoughts
-        
-        Building wealth is a marathon, not a sprint.  Whether you prefer a
-        passive, long‑term approach or an active, short‑term strategy,
-        discipline and risk management are paramount.  Always be wary of
-        unrealistic promises of “100% accuracy” – no model can perfectly
-        predict market moves.  Use tools like this scanner as one input in
-        your decision‑making process rather than as a definitive guide.
-        """
-    )
+    st.info("Use the dropdowns in Crypto/Stocks to view candlestick charts with AI Entry/SL/TP overlays.")
