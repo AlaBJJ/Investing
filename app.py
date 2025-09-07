@@ -410,25 +410,41 @@ def style_table(df: pd.DataFrame) -> Styler:
 # Row selection helper (click row -> chart)
 # ==============================
 def pick_symbol_interactive(df: pd.DataFrame, key: str) -> Optional[str]:
-    """Try selection-enabled dataframe; fallback to symbol buttons."""
+    """
+    Try a selection-enabled dataframe (for newer Streamlit).
+    If unsupported, fall back to a symbol selectbox and quick buttons.
+    """
     selected_symbol = None
     try:
+        # Attempt experimental selection API
         _ = st.dataframe(
             style_table(df[display_cols]),
             use_container_width=True,
-            selection_mode="single",  # newer Streamlit
-            on_select="rerun",        # newer Streamlit
+            selection_mode="single",  # may raise StreamlitAPIException on older builds
+            on_select="rerun",
             key=f"dfsel_{key}"
         )
         state = st.session_state.get(f"dfsel_{key}-selection")
         if state and "rows" in state and state["rows"]:
             idx = state["rows"][0]
             selected_symbol = df.iloc[idx]["Symbol"]
-    except TypeError:
+    except Exception:
+        # Fallback: static table + selectbox + optional quick buttons
         st.dataframe(style_table(df[display_cols]), use_container_width=True)
-        with st.expander("Click a symbol to open its chart"):
+        # Selectbox (always works)
+        with st.container():
+            sb = st.selectbox(
+                "Select a row (symbol) to open chart:",
+                options=[""] + df["Symbol"].astype(str).tolist(),
+                index=0,
+                key=f"select_{key}"
+            )
+            if sb:
+                selected_symbol = sb
+        # Optional quick buttons
+        with st.expander("Or click a symbol button"):
             cols = st.columns(5)
-            for i, sym in enumerate(df["Symbol"].tolist()):
+            for i, sym in enumerate(df["Symbol"].astype(str).tolist()):
                 if cols[i % 5].button(sym, key=f"symbtn_{key}_{sym}"):
                     selected_symbol = sym
     return selected_symbol
@@ -520,7 +536,7 @@ with tabs[2]:
 
 # --- Chart View (info)
 with tabs[3]:
-    st.info("Click a row in any table (or use the symbol buttons in the expander) to load its candlestick chart with AI Entry/SL/TP overlays.")
+    st.info("Select a row (or use the symbol buttons) in any table to load its candlestick chart with AI Entry/SL/TP overlays.")
 
 # --- My Portfolio (manual entries with live P/L)
 with tabs[4]:
